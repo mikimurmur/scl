@@ -190,7 +190,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // 这里只在检测不到 bus 时关闭辅助功能桥，其它 GTK 警告仍会正常输出。
     disable_accessibility_bridge_if_unavailable();
 
-    tracing::info!("正在初始化恐慌回调");
+    tracing::info!("正在初始化Panic回调");
     panic::install();
     tracing::info!("正在创建窗口");
 

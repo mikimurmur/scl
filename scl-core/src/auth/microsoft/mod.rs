@@ -27,7 +27,7 @@ impl<T: Display> MicrosoftOAuth<T> {
     }
 
     /// 获取一个设备码，将其展示给用户以完成浏览器验证
-    pub async fn get_devicecode(&self) -> DynResult<DeviceCodeResponse> {
+    pub fn get_devicecode(&self) -> DynResult<DeviceCodeResponse> {
         let res = crate::http::post(
             "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode?mkt=zh-CN",
         )
@@ -35,47 +35,50 @@ impl<T: Display> MicrosoftOAuth<T> {
             "client_id={}&scope=XboxLive.signin%20offline_access",
             self.client_id
         ))
-        .content_type("application/x-www-form-urlencoded")
-        .recv_json::<DeviceCodeResponse>()
-        .await
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .call()
+        .map_err(|err| anyhow::anyhow!("请求设备码时发生错误：{}", err))?
+        .into_json::<DeviceCodeResponse>()
         .map_err(|err| anyhow::anyhow!("请求设备码时发生错误：{}", err))?;
 
         Ok(res)
     }
 
     /// 获取/验证设备码的验证情况
-    pub async fn verify_device_code(&self, device_code: &str) -> DynResult<TokenResponse> {
+    pub fn verify_device_code(&self, device_code: &str) -> DynResult<TokenResponse> {
         let res =
             crate::http::post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
                 .body_string(format!(
             "grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id={}&device_code={}",
             self.client_id, device_code,
         ))
-                .content_type("application/x-www-form-urlencoded")
-                .recv_json::<TokenResponse>()
-                .await
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .call()
+                .map_err(|err| anyhow::anyhow!("请求设备码时发生错误：{}", err))?
+                .into_json::<TokenResponse>()
                 .map_err(|err| anyhow::anyhow!("请求设备码时发生错误：{}", err))?;
 
         Ok(res)
     }
 
     /// 重新刷新令牌，获取新的访问令牌和刷新令牌
-    async fn refresh_token(&self, refresh_token: &str) -> DynResult<TokenResponse> {
+    fn refresh_token(&self, refresh_token: &str) -> DynResult<TokenResponse> {
         let res =
             crate::http::post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token")
                 .body_string(format!(
                     "grant_type=refresh_token&client_id={}&refresh_token={}",
                     self.client_id, refresh_token,
                 ))
-                .content_type("application/x-www-form-urlencoded")
-                .recv_json::<TokenResponse>()
-                .await
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .call()
+                .map_err(|err| anyhow::anyhow!("请求设备码时发生错误：{}", err))?
+                .into_json::<TokenResponse>()
                 .map_err(|err| anyhow::anyhow!("请求设备码时发生错误：{}", err))?;
 
         Ok(res)
     }
 
-    async fn auth_xbox_live(&self, access_token: &str) -> DynResult<(String, String)> {
+    fn auth_xbox_live(&self, access_token: &str) -> DynResult<(String, String)> {
         tracing::debug!("正在验证 Xbox Live 账户");
         let xbox_auth_body = format!(
             "{\
@@ -97,8 +100,9 @@ impl<T: Display> MicrosoftOAuth<T> {
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
                 .body(xbox_auth_body.as_bytes())
-                .recv_json()
-                .await
+                .call()
+                .map_err(|e| anyhow::anyhow!("验证 Xbox Live 账户失败：{}", e))?
+                .into_json()
                 .map_err(|e| anyhow::anyhow!("验证 Xbox Live 账户失败：{}", e))?;
         let token = xbox_auth_resp.token.to_owned();
         if let Some(uhs) = xbox_auth_resp.display_claims.xui.first() {
@@ -123,8 +127,9 @@ impl<T: Display> MicrosoftOAuth<T> {
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json")
                     .body(xsts_body.as_bytes())
-                    .recv_json()
-                    .await
+                    .call()
+                    .map_err(|e| anyhow::anyhow!("获取 XSTS 账户失败：{}", e))?
+                    .into_json()
                     .map_err(|e| anyhow::anyhow!("获取 XSTS 账户失败：{}", e))?;
             let xsts_token = xsts_resp.token;
             Ok((uhs, xsts_token))
@@ -134,18 +139,14 @@ impl<T: Display> MicrosoftOAuth<T> {
     }
 
     /// 通过设备码验证获取到的 Microsoft 访问令牌获取 Minecraft 账户
-    pub async fn start_auth(
-        &self,
-        access_token: &str,
-        refresh_token: &str,
-    ) -> DynResult<AuthMethod> {
-        let (uhs, xsts_token) = self.auth_xbox_live(access_token).await?;
+    pub fn start_auth(&self, access_token: &str, refresh_token: &str) -> DynResult<AuthMethod> {
+        let (uhs, xsts_token) = self.auth_xbox_live(access_token)?;
 
         tracing::debug!("正在获取 XUID");
-        let xuid = leagcy::get_xuid(&uhs, &xsts_token).await?;
+        let xuid = leagcy::get_xuid(&uhs, &xsts_token)?;
 
         tracing::debug!("正在获取 Mojang 访问令牌");
-        let access_token = leagcy::get_mojang_access_token(&uhs, &xsts_token).await?;
+        let access_token = leagcy::get_mojang_access_token(&uhs, &xsts_token)?;
 
         if access_token.is_empty() {
             anyhow::bail!("获取令牌失败")
@@ -155,12 +156,11 @@ impl<T: Display> MicrosoftOAuth<T> {
                 crate::http::get("https://api.minecraftservices.com/entitlements/mcstore")
                     .header(
                         "Authorization",
-                        format!("Bearer {}", access_token.as_string()),
+                        &format!("Bearer {}", access_token.as_string()),
                     )
-                    .await
+                    .call()
                     .map_err(|e| anyhow::anyhow!(e))?
-                    .body_string()
-                    .await
+                    .into_string()
                     .map_err(|e| anyhow::anyhow!(e))?;
             let mcstore_resp: MinecraftStoreResponse = serde_json::from_str(&mcstore_resp)?;
             if mcstore_resp.items.is_empty() {
@@ -173,21 +173,19 @@ impl<T: Display> MicrosoftOAuth<T> {
                 crate::http::get("https://api.minecraftservices.com/minecraft/profile")
                     .header(
                         "Authorization",
-                        format!("Bearer {}", access_token.as_string()),
+                        &format!("Bearer {}", access_token.as_string()),
                     )
-                    .await
+                    .call()
                     .map_err(|e| anyhow::anyhow!(e))?
-                    .body_json()
-                    .await
+                    .into_json()
                     .map_err(|e| anyhow::anyhow!(e))?;
             if profile_resp.error.is_empty() {
                 if let Some(skin) = profile_resp.skins.iter().find(|a| a.state == "ACTIVE") {
                     tracing::debug!("正在解析皮肤: {}", skin.url);
                     let skin_data = crate::http::get(&skin.url)
-                        .await
+                        .call()
                         .map_err(|e| anyhow::anyhow!(e))?
-                        .body_bytes()
-                        .await
+                        .into_bytes()
                         .map_err(|e| anyhow::anyhow!(e))?;
                     let (head_skin, hat_skin) =
                         crate::auth::parse_head_skin(skin_data).context("解析皮肤数据失败")?;
@@ -213,7 +211,7 @@ impl<T: Display> MicrosoftOAuth<T> {
     }
 
     /// 刷新登录令牌，如刷新成功则可将更新后的用户继续用于正版启动
-    pub async fn refresh_auth(&self, method: &mut AuthMethod) -> DynResult {
+    pub fn refresh_auth(&self, method: &mut AuthMethod) -> DynResult {
         if let AuthMethod::Microsoft {
             access_token,
             refresh_token,
@@ -221,14 +219,14 @@ impl<T: Display> MicrosoftOAuth<T> {
         } = method
         {
             tracing::debug!("正在刷新令牌");
-            let new_token = self.refresh_token(refresh_token.as_str()).await?;
+            let new_token = self.refresh_token(refresh_token.as_str())?;
 
             *refresh_token = new_token.refresh_token.into();
 
-            let (uhs, xsts_token) = self.auth_xbox_live(&new_token.access_token).await?;
+            let (uhs, xsts_token) = self.auth_xbox_live(&new_token.access_token)?;
 
             tracing::debug!("正在获取 Mojang 访问令牌");
-            let new_access_token = leagcy::get_mojang_access_token(&uhs, &xsts_token).await?;
+            let new_access_token = leagcy::get_mojang_access_token(&uhs, &xsts_token)?;
 
             anyhow::ensure!(
                 !new_access_token.is_empty(),

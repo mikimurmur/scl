@@ -1,13 +1,12 @@
 //! NeoForge 模组加载器的下载模块
 use std::{
-    io::{Read, Write},
+    io::{BufRead, Read, Write},
     process::Stdio,
     sync::atomic::AtomicBool,
     time::{Duration, Instant},
 };
 
 use anyhow::Context;
-use inner_future::io::{AsyncBufReadExt, AsyncWriteExt};
 use serde_json::Value;
 
 use super::{
@@ -30,14 +29,11 @@ const CLASS_PATH_SPAREATOR: &str = ":";
 /// 可以通过引入本特质和使用 [`crate::download::Downloader`] 来安装模组加载器
 pub trait NeoForgeDownloadExt: Sync {
     /// 根据纯净版本号获取当前可用的所有 NeoForge 版本
-    async fn get_avaliable_installers(
-        &self,
-        vanilla_version: &str,
-    ) -> DynResult<NeoForgeVersionsData>;
+    fn get_avaliable_installers(&self, vanilla_version: &str) -> DynResult<NeoForgeVersionsData>;
     /// 运行安装 NeoForge 模组加载器的预安装步骤
     ///
     /// 一般是下载各种库和依赖
-    async fn install_neoforge_pre(
+    fn install_neoforge_pre(
         &self,
         version_id: &str,
         vanilla_version: &str,
@@ -46,26 +42,23 @@ pub trait NeoForgeDownloadExt: Sync {
     /// 运行安装 NeoForge 模组加载器的后安装步骤
     ///
     /// 通常是修改安装器信息，然后执行安装器完成最后的安装步骤
-    async fn install_neoforge_post(
+    fn install_neoforge_post(
         &self,
         version_name: &str,
         version_id: &str,
         neoforge_version: &str,
     ) -> DynResult;
     /// 将安装器的部分信息进行修改，如版本名称，下载源等
-    async fn modify_neoforge_installer(
+    fn modify_neoforge_installer(
         &self,
-        from_reader: std::fs::File,
-        to_writer: std::fs::File,
+        from_reader: fs_err::File,
+        to_writer: fs_err::File,
         name: &str,
     ) -> DynResult;
 }
 
 impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
-    async fn get_avaliable_installers(
-        &self,
-        vanilla_version: &str,
-    ) -> DynResult<NeoForgeVersionsData> {
+    fn get_avaliable_installers(&self, vanilla_version: &str) -> DynResult<NeoForgeVersionsData> {
         let mut versions_data =
             crate::http::retry_get_json::<Vec<NeoForgeItemInfo>>(match self.source {
                 DownloadSource::BMCLAPI => {
@@ -73,7 +66,6 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
                 }
                 _ => format!("https://bmclapi2.bangbang93.com/neoforge/list/{vanilla_version}"),
             })
-            .await
             .map_err(|e| {
                 anyhow::anyhow!(
                     "下载 NeoForge {} 安装器版本元数据失败：{:?}",
@@ -98,7 +90,7 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
         })
     }
 
-    async fn install_neoforge_pre(
+    fn install_neoforge_pre(
         &self,
         version_id: &str,
         vanilla_version: &str,
@@ -116,10 +108,7 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
         if std::path::Path::new(&full_path).is_file() {
             return Ok(());
         }
-        inner_future::fs::create_dir_all(
-            &full_path[..full_path.rfind('/').unwrap_or(full_path.len())],
-        )
-        .await?;
+        fs_err::create_dir_all(&full_path[..full_path.rfind('/').unwrap_or(full_path.len())])?;
 
         r.set_message(format!("下载 NeoForge 安装器 {neoforge_version}"));
         r.add_max_progress(1.);
@@ -128,30 +117,26 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
             match self.source {
                 DownloadSource::Default => format!("https://maven.neoforged.net/releases/net/neoforged/neoforge/{neoforge_version}/neoforge-{neoforge_version}-installer.jar"),
                 DownloadSource::BMCLAPI => format!("https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/{neoforge_version}/neoforge-{neoforge_version}-installer.jar"),
-                DownloadSource::MCBBS => format!("https://download.mcbbs.net/maven/net/neoforged/neoforge/{neoforge_version}/neoforge-{neoforge_version}-installer.jar"),
                 _ => format!("https://maven.neoforged.net/releases/net/neoforged/neoforge/{neoforge_version}/neoforge-{neoforge_version}-installer.jar")
             },
             format!("https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/{neoforge_version}/neoforge-{neoforge_version}-installer.jar"),
-            format!("https://download.mcbbs.net/maven/net/neoforged/neoforge/{neoforge_version}/neoforge-{neoforge_version}-installer.jar"),
             format!("https://maven.neoforged.net/releases/net/neoforged/neoforge/{neoforge_version}/neoforge-{neoforge_version}-installer.jar"),
         ];
 
-        crate::http::download(&uris, &full_path, 0)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "下载 NeoForge {}-{} 安装器失败：{:?}",
-                    version_id,
-                    neoforge_version,
-                    e
-                )
-            })?;
+        crate::http::download(&uris, &full_path, 0).map_err(|e| {
+            anyhow::anyhow!(
+                "下载 NeoForge {}-{} 安装器失败：{:?}",
+                version_id,
+                neoforge_version,
+                e
+            )
+        })?;
 
         r.add_progress(1.);
         Ok(())
     }
 
-    async fn install_neoforge_post(
+    fn install_neoforge_post(
         &self,
         version_name: &str,
         version_id: &str,
@@ -166,17 +151,8 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
             self.minecraft_library_path.as_str()
         );
 
-        inner_future::fs::create_dir_all(std::path::Path::new(&installer_path).parent().unwrap())
-            .await?;
-        let mut file = inner_future::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&installer_path)
-            .await?;
-        file.write_all(FORGE_INSTALL_HELPER).await?;
-        let _ = file.flush().await;
-        let _ = file.sync_all().await;
+        fs_err::create_dir_all(std::path::Path::new(&installer_path).parent().unwrap())?;
+        fs_err::write(&installer_path, FORGE_INSTALL_HELPER)?;
 
         // TODO: 换成自己的安装代码
         // Run installer
@@ -198,43 +174,30 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
         );
         tracing::trace!("Writing temp neoforge installer from {full_path} to {tmp_full_path}");
         {
-            let version_name = version_name.to_owned();
-            let full_path = full_path.to_owned();
-            let tmp_full_path = tmp_full_path.to_owned();
-            let full_path_c = full_path.to_owned();
-            let tmp_full_path_c = tmp_full_path.to_owned();
-            let (from_file, to_file) = futures::future::try_join(
-                inner_future::unblock(move || {
-                    std::fs::OpenOptions::new().read(true).open(full_path)
-                }),
-                inner_future::unblock(move || {
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .open(tmp_full_path)
-                }),
-            )
-            .await?;
+            let from_file = fs_err::OpenOptions::new().read(true).open(&full_path)?;
+            let to_file = fs_err::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_full_path)?;
             tracing::trace!("Modifying");
-            self.modify_neoforge_installer(from_file, to_file, &version_name)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "修改 NeoForge 模组安装器文件 {full_path_c} 到 {tmp_full_path_c} 时发生错误"
-                        )
-                    })?;
+            self.modify_neoforge_installer(from_file, to_file, version_name)
+                .with_context(|| {
+                    format!(
+                        "修改 NeoForge 模组安装器文件 {full_path} 到 {tmp_full_path} 时发生错误"
+                    )
+                })?;
         }
 
         r.add_max_progress(2.);
         r.set_message("正在修改安装器参数".into());
 
         #[cfg(not(windows))]
-        let mut cmd = inner_future::process::Command::new(&self.java_path);
+        let mut cmd = std::process::Command::new(&self.java_path);
         #[cfg(windows)]
         let mut cmd = {
-            use inner_future::process::windows::CommandExt;
-            let mut cmd = inner_future::process::Command::new(&self.java_path);
+            use std::os::windows::process::CommandExt;
+            let mut cmd = std::process::Command::new(&self.java_path);
             cmd.creation_flags(0x08000000);
             cmd
         };
@@ -266,13 +229,12 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
         let mut delay_timer = Instant::now();
 
         if let Some(stdout) = child.stdout.take() {
-            let mut stdout = inner_future::io::BufReader::new(stdout);
+            let mut stdout = std::io::BufReader::new(stdout);
             let mut buf = String::with_capacity(256);
             loop {
-                if let Ok(len) = stdout.read_line(&mut buf).await {
-                    if len == 0 {
-                        break;
-                    } else {
+                match stdout.read_line(&mut buf) {
+                    Ok(0) => break,
+                    Ok(len) => {
                         let line = buf[..len].trim();
 
                         let delayed = delay_timer.elapsed() > Duration::from_millis(16);
@@ -314,6 +276,7 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
 
                         buf.clear()
                     }
+                    Err(_) => break,
                 }
             }
         }
@@ -321,26 +284,48 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
         drop(ir);
         drop(pr);
 
-        let status = child.status().await?;
+        let status = child.wait()?;
         r.add_progress(1.);
         r.remove_progress();
-        inner_future::fs::remove_file(tmp_full_path).await?;
-        if status.success() && install_succeed.load(std::sync::atomic::Ordering::SeqCst) {
-            Ok(())
-        } else {
+        fs_err::remove_file(tmp_full_path)?;
+        // 安装器返回 0 只代表进程正常退出；是否装好要看产物是否真的落盘。
+        // NeoForge 安装器的 stdout 不保证输出 Forge 安装器那行 "true"，
+        // 因此不能把该标记当作成功的前置条件（否则会误报“安装失败，返回值 0”）。
+        let installed_version_json = std::path::Path::new(&self.minecraft_version_path)
+            .join(version_name)
+            .join(format!("{version_name}.json"));
+        if !status.success() {
             anyhow::bail!(
                 "执行 NeoForge {}-{} 安装器失败，运行器返回值：{}",
                 version_id,
                 neoforge_version,
                 status
-            )
+            );
         }
+        if !installed_version_json.is_file() {
+            anyhow::bail!(
+                "NeoForge {}-{} 安装器已正常退出（运行器返回值：{}），但未找到版本元数据 {}\n\
+                 这通常表示安装器写入了不同的版本名称或目录（NeoForge 与 Forge 的产物布局可能不同），\
+                 请检查 versions 目录下的实际产物",
+                version_id,
+                neoforge_version,
+                status,
+                installed_version_json.display()
+            );
+        }
+        if !install_succeed.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::debug!(
+                "NeoForge 安装器未输出 true 标记，但退出码为 0 且已找到版本元数据：{}",
+                installed_version_json.display()
+            );
+        }
+        Ok(())
     }
 
-    async fn modify_neoforge_installer(
+    fn modify_neoforge_installer(
         &self,
-        from_reader: std::fs::File,
-        to_writer: std::fs::File,
+        from_reader: fs_err::File,
+        to_writer: fs_err::File,
         name: &str,
     ) -> DynResult {
         tracing::trace!("Opening file");
@@ -376,7 +361,6 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
                                     DownloadSource::BMCLAPI => {
                                         "https://bmclapi2.bangbang93.com/maven"
                                     }
-                                    DownloadSource::MCBBS => "https://download.mcbbs.net/maven",
                                     _ => "https://maven.neoforged.net/releases",
                                 };
                                 if let Some(Value::Array(array)) = obj.get_mut("libraries") {
@@ -475,7 +459,10 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
                                 serde_json::to_string_pretty(&install_profile)?
                             );
                             let output = serde_json::to_vec_pretty(&install_profile)?;
-                            out_file.start_file(entry.name(), Default::default())?;
+                            out_file.start_file(
+                                entry.name(),
+                                zip::write::SimpleFileOptions::default(),
+                            )?;
                             out_file.write_all(&output)?;
                         }
                         _ => {
@@ -485,7 +472,8 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
                     }
                 } else if entry.is_dir() {
                     // tracing::trace!("Added dir {}", entry.name());
-                    out_file.add_directory(entry.name(), Default::default())?;
+                    out_file
+                        .add_directory(entry.name(), zip::write::SimpleFileOptions::default())?;
                 }
             }
         }

@@ -205,8 +205,8 @@ pub fn manually_add_java(ctx: &EventCtx, _data: &mut AppState, path: &str) {
     let sink = ctx.get_external_handle();
     let progress = Progress::new(sink.clone());
     progress.send(ReportState::SetMessage("正在检索运行时信息".into()));
-    thread_main(async move {
-        let result = JavaRuntime::from_java_path(&path).await;
+    thread_main(move || {
+        let result = JavaRuntime::from_java_path(&path);
         progress.remove();
         let runtime = result?;
         let info = runtime_info(&runtime);
@@ -222,15 +222,15 @@ pub fn search_java(ctx: &EventCtx, _data: &AppState) {
     progress.send(ReportState::SetMessage(
         "正在尝试搜索已有 Java 运行时".into(),
     ));
-    thread_main(async move {
-        let mut candidates = search_for_java().await;
+    thread_main(move || {
+        let mut candidates = search_for_java();
         if candidates.is_empty() {
             candidates.push("java".into());
         }
         progress.send(ReportState::SetMessage("正在检索运行时信息".into()));
         let mut result = Vec::new();
         for path in candidates {
-            match JavaRuntime::from_java_path(&path).await {
+            match JavaRuntime::from_java_path(&path) {
                 Ok(runtime) => result.push(runtime_info(&runtime)),
                 Err(err) => tracing::error!("无法解析 Java 运行时: {err}"),
             }

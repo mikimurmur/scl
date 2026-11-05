@@ -25,9 +25,9 @@ pub fn login(ctx: &EventCtx, data: &mut AppState) {
     data.login_error = None;
     data.login_microsoft_code.clear();
     data.login_microsoft_url.clear();
-    thread_main(async move {
+    thread_main(move || {
         let oauth = MicrosoftOAuth::new(CLIENT_ID);
-        let device = oauth.get_devicecode().await?;
+        let device = oauth.get_devicecode()?;
         let _ = sink.submit_command(
             APP_EVENT,
             AppEvent::MicrosoftCode {
@@ -42,8 +42,8 @@ pub fn login(ctx: &EventCtx, data: &mut AppState) {
         let interval = device.interval.max(3) as u64;
         let mut last_error = String::new();
         for _ in 0..(device.expires_in / interval as usize).max(1) {
-            smol::Timer::after(Duration::from_secs(interval)).await;
-            match oauth.verify_device_code(&device.device_code).await {
+            std::thread::sleep(Duration::from_secs(interval));
+            match oauth.verify_device_code(&device.device_code) {
                 Ok(token) => {
                     if !token.error.is_empty() {
                         // 官方按设备码轮询结果的错误码分别给出提示，其余错误原样带出。
@@ -75,7 +75,7 @@ pub fn login(ctx: &EventCtx, data: &mut AppState) {
                     let refresh_token = token.refresh_token.to_owned();
                     let _ =
                         sink.submit_command(APP_EVENT, AppEvent::MicrosoftSuccess, Target::Global);
-                    match oauth.start_auth(&access_token, &refresh_token).await {
+                    match oauth.start_auth(&access_token, &refresh_token) {
                         Ok(auth) => {
                             let _ = sink.submit_command(
                                 APP_EVENT,

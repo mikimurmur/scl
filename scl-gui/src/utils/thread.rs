@@ -1,71 +1,83 @@
-//! 一些用于在后台线程运行异步任务的工具。
+//! 一些用于在后台线程运行阻塞任务的工具。
+//!
+//! 每个后台任务按需 `std::thread::spawn` 一个操作系统线程，任务结束线程自然退出；
+//! 不再维护共享的后台线程池。需要大量并发的下载任务由 scl-core 的 64 线程
+//! rayon 下载池负责，与这里相互独立。
 
-use std::{future::Future, sync::Once};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use once_cell::sync::Lazy;
+/// 后台任务序号，仅用于日志区分，不含任何敏感信息。
+static NEXT_BACKGROUND_TASK: AtomicU64 = AtomicU64::new(1);
 
-/// 所有后台任务共用的异步执行器，对应原版的单一后台线程（日志中的 `ThreadId(2)`）。
-static EXECUTOR: Lazy<smol::Executor<'static>> = Lazy::new(smol::Executor::new);
-static EXECUTOR_STARTED: Once = Once::new();
-
-/// 启动后台线程（重复调用无副作用），并输出与原版一致的线程启动日志。
+/// 按需创建一个后台线程执行任务。
 ///
-/// 官方线程经 `std::thread::Builder::new()` 直接 spawn（无名，`ThreadId(2)`），
-/// 句柄记录在 `THREAD_MANAGER` 内；这里保持无名以对齐 panic 输出与 `/proc` 视图。
-pub fn ensure_background_thread() {
-    EXECUTOR_STARTED.call_once(|| {
-        let _ = std::thread::Builder::new().spawn(|| {
-            tracing::info!("后台线程 {:?} 已启动", std::thread::current().id());
-            smol::block_on(EXECUTOR.run(std::future::pending::<()>()));
+/// 创建线程失败时不能静默吞掉：记录错误并通过原版风格的非致命错误弹窗提示用户。
+fn spawn_background_task<F>(location: String, task: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    let task_id = NEXT_BACKGROUND_TASK.fetch_add(1, Ordering::Relaxed);
+    let thread_location = location.clone();
+    let spawn_result = std::thread::Builder::new()
+        // 无名线程：与官方后台线程保持一致，避免线程名干扰日志/诊断。
+        .spawn(move || {
+            tracing::trace!(
+                "后台任务 #{task_id} 在 {:?} 上执行，来源 {thread_location}",
+                std::thread::current().id()
+            );
+            task();
         });
-    });
+    if let Err(err) = spawn_result {
+        tracing::error!("无法为后台任务创建线程（来源 {location}）：{err:?}");
+        crate::panic::show_background_error_dialog(
+            location,
+            format!("无法为后台任务创建线程：{err:?}"),
+        );
+    }
 }
 
-/// 在一个新的线程中运行异步任务
+/// 兼容既有调用点：后台线程现在按任务按需创建，不再需要提前启动。
+pub fn ensure_background_thread() {}
+
+/// 在一个新的线程中运行阻塞任务
 ///
 /// 这个函数会立即返回，任务的运行结果会通过日志输出。如果需要在任务结束后更新界面，
 /// 请使用 [`druid::ExtEventSink`] 发送命令或通知。
 #[track_caller]
-pub fn thread_main<F>(future: F)
+pub fn thread_main<F>(task: F)
 where
-    F: Future<Output = anyhow::Result<()>> + Send + 'static,
+    F: FnOnce() -> anyhow::Result<()> + Send + 'static,
 {
-    ensure_background_thread();
     let caller = std::panic::Location::caller();
     let location = format!("{}:{}", caller.file(), caller.line());
-    EXECUTOR
-        .spawn(async move {
-            tracing::trace!("正在执行来自 {location} 的任务");
-            if let Err(err) = future.await {
-                // 官方错误路径只经 g_idle_add_full 弹窗，不产生额外日志。
-                crate::panic::show_async_error_dialog(location, format!("{err:#?}"));
-            }
-        })
-        .detach();
+    let dialog_location = location.clone();
+    spawn_background_task(location, move || {
+        if let Err(err) = task() {
+            // 官方错误路径只经 g_idle_add_full 弹窗，不产生额外日志。
+            crate::panic::show_background_error_dialog(dialog_location, format!("{err:#?}"));
+        }
+    });
 }
 
-/// 在一个新的线程中运行异步任务，失败时显示原版风格的非致命错误弹窗。
+/// 在一个新的线程中运行阻塞任务，失败时显示原版风格的非致命错误弹窗。
 ///
 /// 与原版 `thread_main` 一致：闭包捕获调用点的 `file:line`，作为弹窗正文中的
-/// “执行位于 … 的后台异步任务”。下载/元数据任务使用本函数；启动期错误仍走
+/// “执行位于 … 的后台任务”。下载/元数据任务使用本函数；启动期错误仍走
 /// `launch_error` 页面，不受影响。
 #[track_caller]
-pub fn thread_main_report<F>(future: F)
+pub fn thread_main_report<F>(task: F)
 where
-    F: Future<Output = Result<(), String>> + Send + 'static,
+    F: FnOnce() -> Result<(), String> + Send + 'static,
 {
-    ensure_background_thread();
     let caller = std::panic::Location::caller();
     let location = format!("{}:{}", caller.file(), caller.line());
-    EXECUTOR
-        .spawn(async move {
-            tracing::trace!("正在执行来自 {location} 的任务");
-            if let Err(err) = future.await {
-                // 官方错误路径只经 g_idle_add_full 弹窗，不产生额外日志。
-                crate::panic::show_async_error_dialog(location, err);
-            }
-        })
-        .detach();
+    let dialog_location = location.clone();
+    spawn_background_task(location, move || {
+        if let Err(err) = task() {
+            // 官方错误路径只经 g_idle_add_full 弹窗，不产生额外日志。
+            crate::panic::show_background_error_dialog(dialog_location, err);
+        }
+    });
 }
 
 /// 把一个 `image` 库的图像转换为 Druid 使用的图像缓冲区
@@ -86,17 +98,16 @@ mod tests {
 
     use super::*;
 
-    /// 消息同步压入无界队列后返回，后台线程按接收顺序 spawn 到执行器，
-    /// 即提交顺序 = 执行顺序（FIFO）。
+    /// 提交的全部任务都应被执行（每个任务独立线程，不保证执行顺序）。
     #[test]
-    fn tasks_run_in_submission_order() {
+    fn tasks_all_execute() {
         let order = Arc::new(Mutex::new(Vec::new()));
         let done = Arc::new(Mutex::new(0usize));
         let total = 32;
         for i in 0..total {
             let order = order.clone();
             let done = done.clone();
-            thread_main(async move {
+            thread_main(move || {
                 order.lock().unwrap().push(i);
                 *done.lock().unwrap() += 1;
                 Ok(())
@@ -108,20 +119,22 @@ mod tests {
         }
         let taken = order.lock().unwrap().clone();
         assert_eq!(taken.len(), total, "全部任务应被执行");
+        let mut sorted = taken;
+        sorted.sort_unstable();
         assert_eq!(
-            taken,
+            sorted,
             (0..total).collect::<Vec<_>>(),
-            "任务应按提交顺序执行"
+            "每个任务应恰好执行一次"
         );
     }
 
-    /// 官方任务运行在独立后台线程上，与 GUI 主线程互不依赖；
+    /// 后台任务运行在独立线程上，与 GUI 主线程互不依赖；
     /// 本地同样无需 GTK/Druid 主循环参与即可执行（GUI 更新走 ExtEventSink）。
     #[test]
     fn tasks_start_without_gui_loop() {
         let (tx, rx) = std::sync::mpsc::channel::<std::time::Instant>();
         let submitted = std::time::Instant::now();
-        thread_main(async move {
+        thread_main(move || {
             let _ = tx.send(std::time::Instant::now());
             Ok(())
         });
@@ -134,16 +147,35 @@ mod tests {
         );
     }
 
+    /// 每个任务使用独立线程，长等待任务不会阻塞其它任务。
+    #[test]
+    fn long_waiting_task_does_not_block_other_tasks() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (other_tx, other_rx) = std::sync::mpsc::channel::<()>();
+        thread_main(move || {
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(5));
+            Ok(())
+        });
+        thread_main(move || {
+            let _ = other_tx.send(());
+            Ok(())
+        });
+        other_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("第二个任务不应被长等待任务阻塞");
+        let _ = release_tx.send(());
+    }
+
     /// 官方失败任务经 `#[track_caller]` 捕获调用点后弹窗；
     /// 本地同样进入错误弹窗队列，且载荷包含 `file:line` 调用点。
     #[cfg(target_os = "linux")]
     #[test]
     fn failed_task_queues_dialog_with_caller_location() {
-        let before = crate::panic::async_error_dialog_queue_snapshot();
-        thread_main(async move { anyhow::bail!("模拟后台任务失败") });
+        let before = crate::panic::background_error_dialog_queue_snapshot();
+        thread_main(|| anyhow::bail!("模拟后台任务失败"));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let after = crate::panic::async_error_dialog_queue_snapshot();
+            let after = crate::panic::background_error_dialog_queue_snapshot();
             if after.len() > before.len() {
                 let (location, error) = after.last().unwrap();
                 assert!(

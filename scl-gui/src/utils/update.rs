@@ -25,10 +25,10 @@ fn normalize_version(version: &str) -> String {
 }
 
 /// 获取最新版本号
-pub async fn latest_version() -> anyhow::Result<String> {
+pub fn latest_version() -> anyhow::Result<String> {
     let mut last_error = None;
     for url in UPDATE_URLS {
-        match scl_core::http::retry_get_string(url).await {
+        match scl_core::http::retry_get_string(url) {
             Ok(text) => {
                 let trimmed = text.trim();
                 // 恢复版额外兼容 GitHub Release JSON（官方 1.2.0 只认纯文本）；
@@ -54,18 +54,18 @@ pub async fn latest_version() -> anyhow::Result<String> {
 }
 
 /// 拉取指定版本的更新记录；失败时返回空字符串并记录官方文案的错误日志。
-pub async fn fetch_update_logs(version: &str) -> String {
+pub fn fetch_update_logs(version: &str) -> String {
     let url = format!("{UPDATE_LOGS_URL}{version}");
-    match scl_core::http::retry_get(&url).await {
-        Ok(mut response) => {
-            if !response.status().is_success() {
+    match scl_core::http::retry_get(&url) {
+        Ok(response) => {
+            if !response.is_success() {
                 tracing::error!(
                     "无法获取版本更新记录：请求的链接返回了非成功的状态码：{}",
                     response.status()
                 );
                 return String::new();
             }
-            match response.body_string().await {
+            match response.into_string() {
                 Ok(logs) => logs,
                 Err(err) => {
                     tracing::error!("无法获取版本更新记录：{err}");
@@ -102,7 +102,7 @@ pub const UPDATE_TEMP_DIR: &str = "scl-latest";
 /// 下载最新版本的 SCL 并交给更新器覆盖当前程序。
 ///
 /// 成功后本函数不会返回，更新器会接管覆盖流程并重启新版本启动器。
-pub async fn self_update() -> anyhow::Result<()> {
+pub fn self_update() -> anyhow::Result<()> {
     use anyhow::Context;
 
     tracing::info!("正在下载最新版本的 SCL");
@@ -114,7 +114,7 @@ pub async fn self_update() -> anyhow::Result<()> {
     let mut last_error = None;
     let data = 'download: {
         for url in urls {
-            match scl_core::http::retry_get_bytes(&url).await {
+            match scl_core::http::retry_get_bytes(&url) {
                 Ok(data) => break 'download data,
                 Err(err) => {
                     tracing::error!(
@@ -131,7 +131,7 @@ pub async fn self_update() -> anyhow::Result<()> {
 
     let exe = std::env::current_exe().context("无法获取当前可执行文件路径")?;
     let temp_dir = exe.with_file_name(UPDATE_TEMP_DIR);
-    std::fs::create_dir_all(&temp_dir)
+    fs_err::create_dir_all(&temp_dir)
         .with_context(|| format!("创建更新临时目录 {} 失败", temp_dir.display()))?;
     let new_file = temp_dir.join(
         exe.file_name()
@@ -139,17 +139,16 @@ pub async fn self_update() -> anyhow::Result<()> {
             .unwrap_or_else(|| "scl-new".to_owned()),
     );
     // 上一个更新器可能还在退出过程中，先清理目标文件再原子写入
-    let _ = smol::fs::remove_file(&new_file).await;
-    crate::utils::prelude::write_file_safe_async(&new_file, &data)
-        .await
+    let _ = fs_err::remove_file(&new_file);
+    crate::utils::prelude::write_file_safe(&new_file, &data)
         .with_context(|| format!("写入更新文件 {} 失败", new_file.display()))?;
 
     #[cfg(unix)]
     {
-        let meta = std::fs::metadata(&exe).context("获取当前执行程序文件元数据失败")?;
+        let meta = fs_err::metadata(&exe).context("获取当前执行程序文件元数据失败")?;
         use std::os::unix::fs::PermissionsExt;
         let mode = meta.permissions().mode() & 0o777;
-        std::fs::set_permissions(&new_file, std::fs::Permissions::from_mode(mode))
+        fs_err::set_permissions(&new_file, std::fs::Permissions::from_mode(mode))
             .context("复制可执行权限到更新临时文件失败")?;
     }
 
@@ -160,26 +159,24 @@ pub async fn self_update() -> anyhow::Result<()> {
         "scl-updater"
     };
     let updater = temp_dir.join(updater_name);
-    copy_and_update(&exe, &updater, &new_file).await?;
+    copy_and_update(&exe, &updater, &new_file)?;
     Ok(())
 }
 
 /// 把当前启动器复制为更新器，并交给它执行两阶段覆盖。
 ///
 /// 对应官方 `utils::update::update::copy_and_update` 的职责：
-/// 使用 `copy_file_safe_async` 原子复制当前可执行文件，然后启动
+/// 使用 `copy_file_safe` 原子复制当前可执行文件，然后启动
 /// `scl-updater --update <新文件> <目标文件>`。
-async fn copy_and_update(
+fn copy_and_update(
     exe: &std::path::Path,
     updater: &std::path::Path,
     new_file: &std::path::Path,
 ) -> anyhow::Result<()> {
     // Windows 上 rename 不能覆盖已存在的更新器文件
     #[cfg(target_os = "windows")]
-    let _ = smol::fs::remove_file(updater).await;
-    crate::utils::prelude::copy_file_safe_async(exe, updater)
-        .await
-        .context("无法启动更新器")?;
+    let _ = fs_err::remove_file(updater);
+    crate::utils::prelude::copy_file_safe(exe, updater).context("无法启动更新器")?;
     std::process::Command::new(updater)
         .arg("--update")
         .arg(new_file)
@@ -208,8 +205,8 @@ pub fn run_updater(args: &[String]) -> anyhow::Result<()> {
         target.with_file_name(name)
     };
     loop {
-        let _ = std::fs::remove_file(&old_file);
-        match std::fs::rename(target, &old_file).and_then(|()| std::fs::rename(new_file, target)) {
+        let _ = fs_err::remove_file(&old_file);
+        match fs_err::rename(target, &old_file).and_then(|()| fs_err::rename(new_file, target)) {
             Ok(()) => break,
             Err(_) => {
                 std::thread::sleep(std::time::Duration::from_millis(300));
@@ -229,14 +226,14 @@ pub fn run_updater(args: &[String]) -> anyhow::Result<()> {
 pub fn run_post_updater(args: &[String]) -> anyhow::Result<()> {
     let old_file = args.first().context("没有提供目标文件路径")?;
     let old_file = std::path::Path::new(old_file);
-    let _ = std::fs::remove_file(old_file);
+    let _ = fs_err::remove_file(old_file);
     if let Some(dir) = old_file.parent() {
         if dir
             .file_name()
             .map(|name| name == UPDATE_TEMP_DIR)
             .unwrap_or(false)
         {
-            let _ = std::fs::remove_dir_all(dir);
+            let _ = fs_err::remove_dir_all(dir);
         }
     }
     Ok(())

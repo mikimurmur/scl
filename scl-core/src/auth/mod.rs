@@ -73,14 +73,13 @@ pub fn parse_head_skin(result: Vec<u8>) -> DynResult<(Vec<u8>, Vec<u8>)> {
     Ok((skin_data, skin_hat_data))
 }
 
-async fn get_head_skin(uuid: &str) -> DynResult<(Vec<u8>, Vec<u8>)> {
+fn get_head_skin(uuid: &str) -> DynResult<(Vec<u8>, Vec<u8>)> {
     // https://sessionserver.mojang.com/session/minecraft/profile/{uuid}
     let uri = format!("https://sessionserver.mojang.com/session/minecraft/profile/{uuid}");
     let result: ProfileResponse = crate::http::get(uri)
-        .await
+        .call()
         .map_err(|e| anyhow::anyhow!(e))?
-        .body_json()
-        .await
+        .into_json()
         .map_err(|e| anyhow::anyhow!(e))?;
     if let Some(prop) = result
         .properties
@@ -95,8 +94,9 @@ async fn get_head_skin(uuid: &str) -> DynResult<(Vec<u8>, Vec<u8>)> {
                 let skin_url = skin.url;
                 parse_head_skin(
                     crate::http::get(skin_url)
-                        .recv_bytes()
-                        .await
+                        .call()
+                        .map_err(|e| anyhow::anyhow!(e))?
+                        .into_bytes()
                         .map_err(|e| anyhow::anyhow!(e))?,
                 )
             } else {
@@ -113,7 +113,7 @@ async fn get_head_skin(uuid: &str) -> DynResult<(Vec<u8>, Vec<u8>)> {
 /// 进行 Mojang 正版验证
 ///
 /// **此验证方式已经弃用**，请开发者建议用户迁移到 Microsoft 账户后使用 [`crate::auth::microsoft::start_auth`] 进行 Microsoft 正版验证
-pub async fn auth_mojang(
+pub fn auth_mojang(
     _ctx: Option<impl Reporter>,
     username: &str,
     password: &Password,
@@ -127,7 +127,7 @@ pub async fn auth_mojang(
         ..Default::default()
     };
     let result: RequestResult<structs::mojang::AuthenticateResponse> =
-        post_data("https://authserver.mojang.com/authenticate", &body).await?;
+        post_data("https://authserver.mojang.com/authenticate", &body)?;
     match result {
         RequestResult::Ok(a) => {
             let selected_profile = if let Some(selected_profile) = a.selected_profile {
@@ -137,7 +137,7 @@ pub async fn auth_mojang(
             } else {
                 anyhow::bail!("该账户没有可用的角色！")
             };
-            let (head_skin, hat_skin) = get_head_skin(&selected_profile.id).await?;
+            let (head_skin, hat_skin) = get_head_skin(&selected_profile.id)?;
             Ok(AuthMethod::Mojang {
                 access_token: a.access_token,
                 uuid: selected_profile.id,
@@ -154,9 +154,9 @@ pub async fn auth_mojang(
 }
 
 /// 刷新/续期访问令牌
-pub async fn refresh_auth(am: &mut AuthMethod, client_token: &str) -> DynResult<bool> {
+pub fn refresh_auth(am: &mut AuthMethod, client_token: &str) -> DynResult<bool> {
     if let &mut AuthMethod::Microsoft { .. } = am {
-        return Ok(microsoft::leagcy::refresh_auth(am).await.is_ok());
+        return Ok(microsoft::leagcy::refresh_auth(am).is_ok());
     }
     match am {
         AuthMethod::Mojang { access_token, .. } => {
@@ -164,12 +164,13 @@ pub async fn refresh_auth(am: &mut AuthMethod, client_token: &str) -> DynResult<
                 access_token: access_token.to_owned(),
                 client_token: client_token.to_owned(),
             };
+            let body = serde_json::to_vec(&body)?;
             let result = crate::http::post("https://authserver.mojang.com/validate")
-                .body(serde_json::to_vec(&body)?)
+                .body(&body)
                 .header("Content-Type", "application/json")
-                .await
+                .call()
                 .map_err(|e| anyhow::anyhow!("发送用户信息请求失败，可能是网络问题：{:?}", e))?;
-            if result.status().is_success() {
+            if result.is_success() {
                 Ok(true)
             } else {
                 Ok(false)
@@ -179,16 +180,16 @@ pub async fn refresh_auth(am: &mut AuthMethod, client_token: &str) -> DynResult<
             // TODO: 增加正确的检测方式
             let profile_resp =
                 crate::http::get("https://api.minecraftservices.com/minecraft/profile")
-                    .header("Authorization", format!("Bearer {}", access_token))
-                    .await
+                    .header("Authorization", &format!("Bearer {}", access_token))
+                    .call()
                     .map_err(|e| {
                         anyhow::anyhow!("发送用户信息请求失败，有可能是网络问题：{:?}", e)
                     })?;
-            Ok(profile_resp.status().is_success())
+            Ok(profile_resp.is_success())
         }
         AuthMethod::AuthlibInjector { .. } => {
             if let Ok(new_am) =
-                crate::auth::authlib::refresh_token(am.to_owned(), client_token, false).await
+                crate::auth::authlib::refresh_token(am.to_owned(), client_token, false)
             {
                 *am = new_am;
                 Ok(true)

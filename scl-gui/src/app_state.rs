@@ -265,7 +265,7 @@ pub struct AppState {
     pub version_setting_maps_desc: String,
     /// 版本资源包页面描述
     pub version_setting_resource_packs_desc: String,
-    /// 版本设置页加载批次号：进页/退出页时递增，用于丢弃迟到的异步回调
+    /// 版本设置页加载批次号：进页/退出页时递增，用于丢弃迟到的后台回调
     pub version_setting_load_token: u64,
     /// 按版本缓存的三行数据；同版本返回时直接复用，不重读
     pub version_setting_cache: Vector<VersionSettingCacheEntry>,
@@ -782,7 +782,7 @@ pub fn apply_mock(state: &mut AppState) {
         ),
         mod_state(
             "Entity Culling",
-            "Using async path-tracing to hide Block-/Entitys.",
+            "Using path-tracing to hide Block-/Entitys.",
             ModSource::Modrinth,
             700_000
         ),

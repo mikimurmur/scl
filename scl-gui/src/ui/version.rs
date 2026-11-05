@@ -120,7 +120,7 @@ fn version_item() -> impl Widget<LocalVersionInfo> {
     Flex::row()
         .with_child(IconButton::dynamic(version_icon).with_flat(true).on_click(
             |ctx, data: &mut LocalVersionInfo, _env| {
-                // 官方入口：点击版本图标异步加载该版本配置并推入
+                // 官方入口：点击版本图标后台加载该版本配置并推入
                 ctx.submit_command(
                     SELECT_VERSION_SETTING
                         .with(data.name.clone())

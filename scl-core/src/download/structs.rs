@@ -43,6 +43,9 @@ pub struct VersionInfo {
 /// 资源索引信息
 #[derive(Debug, Deserialize, PartialEq, Eq, Default)]
 pub struct AssetIndexes {
+    /// 资源索引是否使用虚拟目录（1.6.x 的 `legacy` 索引）
+    #[serde(default, rename = "virtual")]
+    pub is_virtual: bool,
     /// 是否需要在启动游戏前将资源文件映射（复制）到 游戏目录/resources 文件夹内
     ///
     /// 该参数会出现在 pre-1.6 的资源文件内，且都是 `true`
@@ -147,4 +150,33 @@ pub struct OptifineVersionMeta {
     pub patch: String,
     /// 该 Optifine 的下载文件名称
     pub filename: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AssetIndexes;
+
+    /// 1.6.x 的 legacy 索引带 `virtual: true`，必须被解析出来。
+    #[test]
+    fn parses_virtual_asset_index_flag() {
+        let index: AssetIndexes =
+            serde_json::from_str(r#"{"virtual":true,"objects":{}}"#).expect("解析 legacy 索引");
+        assert!(index.is_virtual);
+        assert!(!index.map_to_resources);
+    }
+
+    /// pre-1.6 索引带 `map_to_resources: true`；缺省标志时两者都为 false。
+    #[test]
+    fn parses_map_to_resources_and_defaults() {
+        let index: AssetIndexes =
+            serde_json::from_str(r#"{"map_to_resources":true,"objects":{}}"#)
+                .expect("解析 pre-1.6 索引");
+        assert!(!index.is_virtual);
+        assert!(index.map_to_resources);
+
+        let modern: AssetIndexes =
+            serde_json::from_str(r#"{"objects":{}}"#).expect("解析现代索引");
+        assert!(!modern.is_virtual);
+        assert!(!modern.map_to_resources);
+    }
 }

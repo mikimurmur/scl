@@ -27,8 +27,8 @@ fn spawn_cname_requests(sink: &ExtEventSink, mods: &[ModState]) {
     for item in mods {
         let key = item.slug.clone();
         let sink = sink.clone();
-        thread_main(async move {
-            let cname = scl_core::download::mcmod::get_mod_cname(&key).await;
+        thread_main(move || {
+            let cname = scl_core::download::mcmod::get_mod_cname(&key);
             if !cname.is_empty() {
                 let _ = sink.submit_command(
                     APP_EVENT,
@@ -52,18 +52,20 @@ fn start_search(ctx: &EventCtx, data: &AppState, page: u64) {
         .trim()
         .to_owned();
     let generation = data.mods_download_curseforge_search_generation;
-    thread_main(async move {
+    thread_main(move || {
         let items = curseforge::search_mods(SearchParams {
             game_version: String::new(),
+            // 忠实复刻官方缺陷（OB-01）：页计数原样传入 CF 的 0 基 index，
+            // 首页永远跳过第 1 条结果，翻页窗口仅前移 1 条（与上一页重叠）。
+            // 不要改成 `(page - 1) * page_size`。
             index: page.max(1),
             page_size: 20,
             category_id: 0,
             search_filter: filter,
             sort: SearchSortMethod::Featured,
-        })
-        .await?;
-        // 搜索失败（网络/JSON 解析）时弹出「执行异步任务发生错误」窗，
-        // 不向界面提交命令；成功才把结果送回界面，图标与中文名再逐个异步补上。
+        })?;
+        // 搜索失败（网络/JSON 解析）时弹出「执行后台任务发生错误」窗，
+        // 不向界面提交命令；成功才把结果送回界面，图标与中文名再逐个后台补上。
         let mut mods = Vec::with_capacity(items.len());
         let mut icons = Vec::with_capacity(items.len());
         for item in items {
@@ -86,8 +88,8 @@ fn start_search(ctx: &EventCtx, data: &AppState, page: u64) {
         spawn_cname_requests(&sink, &mods);
         for (id, url) in icons {
             let sink = sink.clone();
-            thread_main(async move {
-                if let Ok(image) = curseforge::get_mod_icon_url(&url).await {
+            thread_main(move || {
+                if let Ok(image) = curseforge::get_mod_icon_url(&url) {
                     if let Ok(icon) = crate::utils::image::from_image_to_string(&image) {
                         let _ = sink.submit_command(
                             APP_EVENT,
@@ -112,8 +114,9 @@ pub fn apply_search(ctx: &mut EventCtx, data: &mut AppState) {
     data.mods_download_curseforge_page = 1;
     data.mods_download_curseforge_searching = false;
     data.mods_download_curseforge_result_mods = None;
-    data.mods_download_curseforge_search_generation =
-        data.mods_download_curseforge_search_generation.wrapping_add(1);
+    data.mods_download_curseforge_search_generation = data
+        .mods_download_curseforge_search_generation
+        .wrapping_add(1);
     tracing::debug!(
         "CurseForge 应用搜索: filter={:?}, game_version_selected={:?}, game_version_download={:?}",
         data.mods_download_curseforge_search_filter,
@@ -133,8 +136,9 @@ pub fn load_more(ctx: &mut EventCtx, data: &mut AppState) {
     data.mods_download_curseforge_page =
         data.mods_download_curseforge_page.saturating_add(1).max(1);
     data.mods_download_curseforge_searching = true;
-    data.mods_download_curseforge_search_generation =
-        data.mods_download_curseforge_search_generation.wrapping_add(1);
+    data.mods_download_curseforge_search_generation = data
+        .mods_download_curseforge_search_generation
+        .wrapping_add(1);
     start_search(ctx, data, data.mods_download_curseforge_page);
 }
 
@@ -162,10 +166,12 @@ pub fn select_mod(ctx: &mut EventCtx, data: &mut AppState, mod_state: &ModState)
     let Ok(id_num) = mod_state.id.parse::<u64>() else {
         return;
     };
-    thread_main(async move {
-        // 文件请求/解析失败时弹出「执行异步任务发生错误」窗，
-        // 文件列表停留空白。
-        let versions = curseforge::get_mod_files(id_num).await?;
+    thread_main(move || {
+        // 忠实复刻官方缺陷（OB-02）：文件列表含 null 字段（如 downloadUrl=null）
+        // 时整批 serde 解析失败，错误经 `?` 冒泡到 thread_main 弹出
+        // 「执行后台任务发生错误」窗；页面已先推入，列表停留空白。
+        // 不要给字段加 Option 或吞掉解析错误。
+        let versions = curseforge::get_mod_files(id_num)?;
         let mut files = Vec::with_capacity(versions.len());
         for file in versions {
             files.push(ModFileState {

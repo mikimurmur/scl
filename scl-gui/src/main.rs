@@ -212,7 +212,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         app_state::apply_mock(&mut state);
     }
 
-    tracing::info!("正在启动后台线程");
+    tracing::info!("后台任务将按需创建线程");
     utils::thread::ensure_background_thread();
     tracing::info!("创建窗口中");
 

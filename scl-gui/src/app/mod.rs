@@ -185,7 +185,7 @@ pub enum AppEvent {
     /// 自更新流程结束，成功则应退出启动器
     UpdateFinished(Result<(), String>),
     /// 版本设置加载完成（仅含版本配置；模组与计数由页面推送后的
-    /// `on_app_push_page` 异步填充，与官方时序一致）
+    /// `on_app_push_page` 后台填充，与官方时序一致）
     VersionConfigLoaded {
         /// 版本名称
         name: String,
@@ -241,8 +241,8 @@ pub enum AppEvent {
     GameCrashed(Option<i32>),
     /// Modrinth 搜索结果
     ///
-    /// 官方分发器只有成功载荷通路：搜索 future 失败（网络/JSON 解析）时
-    /// 直接走 do_async_ok 弹「执行异步任务发生错误」窗，不向界面提交命令。
+    /// 官方分发器只有成功载荷通路：搜索任务失败（网络/JSON 解析）时
+    /// 直接走后台任务错误回调，弹「执行后台任务发生错误」窗，不向界面提交命令。
     /// `generation` 用于丢弃迟到回调（官方以 SEARCH_TIMER 时刻比较）。
     ModrinthLoaded {
         /// 搜索结果
@@ -252,7 +252,7 @@ pub enum AppEvent {
         /// 发起请求时的搜索代次
         generation: u64,
     },
-    /// CurseForge 搜索结果（同上，失败走异步错误弹窗）
+    /// CurseForge 搜索结果（同上，失败走后台错误弹窗）
     CurseforgeLoaded {
         /// 搜索结果
         mods: Vec<ModState>,
@@ -279,7 +279,7 @@ pub enum AppEvent {
         /// 中文名（gitee scl-data 的 MCMOD 译名）
         cname: String,
     },
-    /// 模组文件列表加载完成（失败走异步错误弹窗，不提交本事件）
+    /// 模组文件列表加载完成（失败走后台错误弹窗，不提交本事件）
     ModFilesLoaded {
         /// 文件列表
         files: Vec<ModFileState>,
@@ -336,10 +336,10 @@ fn trace_auto_page(action: &str, page: &str, origin: &'static str) {
     tracing::debug!("auto page {action}: page={page:?}, origin={origin}");
 }
 
-/// 将配置异步保存到磁盘
+/// 将配置保存到磁盘
 pub fn save_config(data: &AppState) {
     let cfg = data.config.to_owned();
-    thread_main(async move { config::save_config(&cfg).await });
+    thread_main(move || config::save_config(&cfg));
 }
 
 /// 设置项发生变化后延迟保存：连续拖动滑块/输入时只落盘最后一次状态。
@@ -347,10 +347,10 @@ fn save_config_debounced(data: &AppState) {
     use std::sync::atomic::Ordering;
     let cfg = data.config.to_owned();
     let generation = CONFIG_SAVE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    thread_main(async move {
-        smol::Timer::after(std::time::Duration::from_millis(250)).await;
+    thread_main(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
         if CONFIG_SAVE_GENERATION.load(Ordering::SeqCst) == generation {
-            if let Err(err) = config::save_config(&cfg).await {
+            if let Err(err) = config::save_config(&cfg) {
                 tracing::error!("保存配置文件失败：{err:?}");
             }
         }
@@ -381,8 +381,8 @@ pub fn update_or_create_auth(ctx: &EventCtx, data: &mut AppState, auth: AuthMeth
 
     if need_skin {
         let sink = ctx.get_external_handle();
-        thread_main(async move {
-            match fetch_head_skin(&uuid).await {
+        thread_main(move || {
+            match fetch_head_skin(&uuid) {
                 Ok((head, hat)) => {
                     let _ = sink.submit_command(
                         APP_EVENT,
@@ -400,14 +400,13 @@ pub fn update_or_create_auth(ctx: &EventCtx, data: &mut AppState, auth: AuthMeth
 }
 
 /// 从 Mojang 会话服务获取玩家头部与帽子皮肤像素
-async fn fetch_head_skin(uuid: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+fn fetch_head_skin(uuid: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     use anyhow::Context as _;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     let profile: serde_json::Value = scl_core::http::retry_get_json(format!(
         "https://sessionserver.mojang.com/session/minecraft/profile/{uuid}"
     ))
-    .await
     .context("获取玩家信息失败")?;
     let value = profile
         .get("properties")
@@ -430,9 +429,7 @@ async fn fetch_head_skin(uuid: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
         .and_then(|url| url.as_str())
         .context("皮肤数据中没有 skin url")?
         .to_owned();
-    let png = scl_core::http::retry_get_bytes(&skin_url)
-        .await
-        .context("下载皮肤失败")?;
+    let png = scl_core::http::retry_get_bytes(&skin_url).context("下载皮肤失败")?;
     scl_core::auth::parse_head_skin(png)
 }
 
@@ -651,7 +648,7 @@ impl AppWrapper {
                 let sink = ctx.get_external_handle();
                 data.login_busy = true;
                 data.login_error = None;
-                thread_main(async move {
+                thread_main(move || {
                     let progress = Progress::new(sink.clone());
                     scl_core::progress::Reporter::send(
                         &progress,
@@ -661,8 +658,7 @@ impl AppWrapper {
                         auth.into_core(),
                         &client_token,
                         true,
-                    )
-                    .await;
+                    );
                     progress.remove();
                     match result {
                         Ok(auth) => {
@@ -702,7 +698,7 @@ impl AppWrapper {
             let source = data.config.download_source.clone();
             let parallel_amount = data.config.download_parallel_amount;
             let sink = ctx.get_external_handle();
-            thread_main(async move {
+            thread_main(move || {
                 let progress = Progress::new(sink.clone());
                 scl_core::progress::Reporter::send(
                     &progress,
@@ -713,13 +709,11 @@ impl AppWrapper {
                     source,
                     parallel_amount,
                     progress.clone(),
-                )
-                .await
-                {
+                ) {
                     Ok(fixed) => {
                         let _ = sink.submit_command(
                             APP_EVENT,
-                            AppEvent::LogLine(format!("修复版本文件完成，修复了 {fixed} 个版本")),
+                            AppEvent::LogLine(format!("修复版本文件完成，修复了 {fixed} 个文件")),
                             Target::Global,
                         );
                     }
@@ -1013,17 +1007,14 @@ impl AppWrapper {
                 data.rebuild_mods_filter();
                 data.version_setting_mods_desc = mods_desc.clone();
                 if cache_epoch == data.version_setting_cache_epoch {
-                    data.version_setting_cache_put(
-                        crate::app_state::VersionSettingCacheEntry {
-                            version_name,
-                            mods: data.version_mods.clone(),
-                            mods_desc,
-                            maps_desc: data.version_setting_maps_desc.clone(),
-                            resource_packs_desc: data.version_setting_resource_packs_desc
-                                .clone(),
-                            epoch: cache_epoch,
-                        },
-                    );
+                    data.version_setting_cache_put(crate::app_state::VersionSettingCacheEntry {
+                        version_name,
+                        mods: data.version_mods.clone(),
+                        mods_desc,
+                        maps_desc: data.version_setting_maps_desc.clone(),
+                        resource_packs_desc: data.version_setting_resource_packs_desc.clone(),
+                        epoch: cache_epoch,
+                    });
                 }
             }
             AppEvent::VersionSettingSaved(name) => {
@@ -1043,7 +1034,7 @@ impl AppWrapper {
                 // 修复任务结束：清空「修复中」提示，根容器 DisabledIf 随之解除。
                 data.starting_tip = None;
                 match result {
-                    Ok(fixed) => tracing::info!("版本级修复完成，修正 {fixed} 项"),
+                    Ok(fixed) => tracing::info!("版本级修复完成，修复 {fixed} 个文件"),
                     Err(err) => tracing::error!("版本级修复失败：{err}"),
                 }
             }
@@ -1083,7 +1074,7 @@ impl AppWrapper {
                     let source = data.config.download_source.clone();
                     let parallel_amount = data.config.download_parallel_amount;
                     let sink = ctx.get_external_handle();
-                    thread_main(async move {
+                    thread_main(move || {
                         // 自动修复必须在界面上可见：官方同一路径使用
                         let progress = Progress::new(sink.clone());
                         scl_core::progress::Reporter::send(
@@ -1097,11 +1088,9 @@ impl AppWrapper {
                             source,
                             parallel_amount,
                             progress.clone(),
-                        )
-                        .await
-                        {
+                        ) {
                             Ok(fixed) => {
-                                tracing::info!("文件完整性检查完成，修复了 {fixed} 个版本文件");
+                                tracing::info!("文件完整性检查完成，修复了 {fixed} 个文件");
                             }
                             Err(err) => {
                                 tracing::warn!("文件完整性检查失败：{err:?}");
@@ -1161,9 +1150,9 @@ impl AppWrapper {
                 data.auto_recheck_retry = false;
                 let sink = ctx.get_external_handle();
                 let wait_until_launched = data.config.wait_until_launched;
-                thread_main(async move {
+                thread_main(move || {
                     if wait_until_launched {
-                        if starting::wait_for_game_window(pid).await {
+                        if starting::wait_for_game_window(pid) {
                             let _ = sink.submit_command(
                                 APP_EVENT,
                                 AppEvent::GameWindowReady,
@@ -1171,15 +1160,8 @@ impl AppWrapper {
                             );
                         }
                     } else {
-                        smol::future::race(
-                            async {
-                                starting::wait_for_game_window(pid).await;
-                            },
-                            async {
-                                smol::Timer::after(std::time::Duration::from_secs(1)).await;
-                            },
-                        )
-                        .await;
+                        // 官方不等待窗口时只给 1 秒观察窗口，随后直接回主页。
+                        starting::wait_for_game_window_for(pid, std::time::Duration::from_secs(1));
                         let _ = sink.submit_command(
                             APP_EVENT,
                             AppEvent::GameWindowReady,
@@ -1200,7 +1182,7 @@ impl AppWrapper {
                         ctx.submit_command(commands::HIDE_WINDOW.to(Target::Window(window)));
                     }
                     if !data.config.dont_close_window_when_launched {
-                        // 与关窗一致：退出前同步保存，避免异步任务被进程退出打断。
+                        // 与关窗一致：退出前同步保存，避免后台任务被进程退出打断。
                         if let Err(err) = config::save_config_sync(&data.config) {
                             tracing::error!("启动游戏后保存配置文件失败：{err:?}");
                         }
@@ -1233,7 +1215,7 @@ impl AppWrapper {
                 page,
                 generation,
             } => {
-                // 迟到回调丢弃：官方 apply_search future 比较 SEARCH_TIMER
+                // 迟到回调丢弃：官方 apply_search 任务比较 SEARCH_TIMER
                 if data.mods_download_modrinth_search_generation != generation {
                     tracing::trace!(
                         "丢弃过期的 Modrinth 搜索结果：generation={generation}，当前={}",
@@ -1353,7 +1335,7 @@ impl AppWrapper {
                     data.login_error = None;
                     data.login_busy = false;
                 } else if *page == PAGE_VERSION_SETTING {
-                    // 官方在该页弹出时异步保存版本设置（含重命名）。
+                    // 官方在该页弹出时后台保存版本设置（含重命名）。
                     version_setting::on_app_pop_page(ctx, data);
                 }
             }
@@ -1368,7 +1350,7 @@ impl AppWrapper {
             {
                 version_setting::save_on_close(data);
             }
-            // 官方在关窗时同步落盘（save_config_sync）。本地原实现异步保存后
+            // 官方在关窗时同步落盘（save_config_sync）。本地原实现后台保存后
             // 立刻 QUIT_APP，进程先退出导致文件根本没写完，这是设置丢失的根因。
             if let Err(err) = config::save_config_sync(&data.config) {
                 tracing::error!("关闭前保存配置文件失败：{err:?}");
@@ -1471,11 +1453,11 @@ impl AppWrapper {
 /// 启动失败/崩溃终态：先回主界面，再推入启动失败页
 fn show_launch_error_page(ctx: &EventCtx) {
     let sink = ctx.get_external_handle();
-    thread_main(async move {
-        smol::Timer::after(std::time::Duration::from_millis(500)).await;
+    thread_main(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
         trace_auto_page("reset", PAGE_MAIN, "launch error 500ms timer");
         let _ = sink.submit_command(crate::ui::RESET_PAGE_TO, PAGE_MAIN, Target::Global);
-        smol::Timer::after(std::time::Duration::from_millis(250)).await;
+        std::thread::sleep(std::time::Duration::from_millis(250));
         trace_auto_page("push", PAGE_LAUNCH_ERROR, "launch error 250ms timer");
         let _ = sink.submit_command(crate::ui::PUSH_PAGE, PAGE_LAUNCH_ERROR, Target::Global);
         Ok(())
@@ -1524,9 +1506,7 @@ impl Widget<AppState> for AppWrapper {
                 if let Ok(page) = std::env::var("SCL_START_PAGE") {
                     let page: &'static str = Box::leak(page.into_boxed_str());
                     if !page.is_empty() {
-                        tracing::debug!(
-                            "test hook SCL_START_PAGE={page:?}: 2s 后自动 PUSH_PAGE"
-                        );
+                        tracing::debug!("test hook SCL_START_PAGE={page:?}: 2s 后自动 PUSH_PAGE");
                         let sink = sink.clone();
                         std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1644,7 +1624,7 @@ fn login_authlib(ctx: &mut EventCtx, data: &mut AppState) {
     let minecraft_folder = data.config.minecraft_folder.to_path_buf();
     let download_source = data.config.download_source.to_owned();
     let parallel_amount = data.config.download_parallel_amount;
-    thread_main(async move {
+    thread_main(move || {
         let progress = Progress::new(sink.clone());
         scl_core::progress::Reporter::send(
             &progress,
@@ -1656,8 +1636,7 @@ fn login_authlib(ctx: &mut EventCtx, data: &mut AppState) {
             username,
             scl_core::password::Password::from(password),
             &client_token,
-        )
-        .await;
+        );
         match result {
             Ok(characters) => {
                 let downloader = scl_core::download::Downloader::<Progress>::default()
@@ -1671,7 +1650,7 @@ fn login_authlib(ctx: &mut EventCtx, data: &mut AppState) {
                         "检查 Authlib Injector 注入库".into(),
                     ),
                 );
-                if let Err(err) = downloader.install_authlib_injector().await {
+                if let Err(err) = downloader.install_authlib_injector() {
                     let _ = sink.submit_command(
                         APP_EVENT,
                         AppEvent::AuthFailed(format!("{err:?}")),
@@ -1683,9 +1662,7 @@ fn login_authlib(ctx: &mut EventCtx, data: &mut AppState) {
                 match characters.len() {
                     1 => {
                         let single = characters.into_iter().next().unwrap();
-                        match scl_core::auth::authlib::refresh_token(single, &client_token, true)
-                            .await
-                        {
+                        match scl_core::auth::authlib::refresh_token(single, &client_token, true) {
                             Ok(auth) => {
                                 let _ = sink.submit_command(
                                     APP_EVENT,
@@ -1725,5 +1702,3 @@ fn login_authlib(ctx: &mut EventCtx, data: &mut AppState) {
         Ok(())
     });
 }
-
-

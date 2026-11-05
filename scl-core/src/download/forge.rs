@@ -1,13 +1,12 @@
 //! Forge 模组加载器的下载模块
 use std::{
-    io::{Read, Write},
+    io::{BufRead, Read, Write},
     process::Stdio,
     sync::atomic::AtomicBool,
     time::{Duration, Instant},
 };
 
 use anyhow::Context;
-use inner_future::io::{AsyncBufReadExt, AsyncWriteExt};
 use serde_json::Value;
 
 use super::{structs::ForgeVersionsData, Downloader};
@@ -33,12 +32,11 @@ const CLASS_PATH_SPAREATOR: &str = ":";
 /// 可以通过引入本特质和使用 [`crate::download::Downloader`] 来安装模组加载器
 pub trait ForgeDownloadExt: Sync {
     /// 根据纯净版本号获取当前可用的所有 Forge 版本
-    async fn get_avaliable_installers(&self, vanilla_version: &str)
-        -> DynResult<ForgeVersionsData>;
+    fn get_avaliable_installers(&self, vanilla_version: &str) -> DynResult<ForgeVersionsData>;
     /// 运行安装 Forge 模组加载器的预安装步骤
     ///
     /// 一般是下载各种库和依赖
-    async fn install_forge_pre(
+    fn install_forge_pre(
         &self,
         version_id: &str,
         vanilla_version: &str,
@@ -47,50 +45,61 @@ pub trait ForgeDownloadExt: Sync {
     /// 运行安装 Forge 模组加载器的后安装步骤
     ///
     /// 通常是修改安装器信息，然后执行安装器完成最后的安装步骤
-    async fn install_forge_post(
+    fn install_forge_post(
         &self,
         version_name: &str,
         version_id: &str,
         forge_version: &str,
     ) -> DynResult;
     /// 将安装器的部分信息进行修改，如版本名称，下载源等
-    async fn modify_forge_installer(
+    fn modify_forge_installer(
         &self,
-        from_reader: std::fs::File,
-        to_writer: std::fs::File,
+        from_reader: fs_err::File,
+        to_writer: fs_err::File,
         name: &str,
     ) -> DynResult;
 }
 
 impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
-    async fn get_avaliable_installers(
-        &self,
-        vanilla_version: &str,
-    ) -> DynResult<ForgeVersionsData> {
-        let (mut versions_data, mut version_promo) = futures::future::try_join(
-            crate::http::retry_get(match self.source {
-                DownloadSource::BMCLAPI => {
-                    format!("https://bmclapi2.bangbang93.com/forge/minecraft/{vanilla_version}")
-                }
-                _ => format!("https://bmclapi2.bangbang93.com/forge/minecraft/{vanilla_version}"),
-            }),
-            crate::http::retry_get(match self.source {
-                DownloadSource::BMCLAPI => "https://bmclapi2.bangbang93.com/forge/promos",
-                _ => "https://bmclapi2.bangbang93.com/forge/promos",
-            }),
-        )
-        .await
-        .map_err(|e| {
+    fn get_avaliable_installers(&self, vanilla_version: &str) -> DynResult<ForgeVersionsData> {
+        let (versions_data, version_promo) = rayon::join(
+            || {
+                crate::http::retry_get(match self.source {
+                    DownloadSource::BMCLAPI => {
+                        format!("https://bmclapi2.bangbang93.com/forge/minecraft/{vanilla_version}")
+                    }
+                    _ => {
+                        format!("https://bmclapi2.bangbang93.com/forge/minecraft/{vanilla_version}")
+                    }
+                })
+            },
+            || {
+                crate::http::retry_get(match self.source {
+                    DownloadSource::BMCLAPI => "https://bmclapi2.bangbang93.com/forge/promos",
+                    _ => "https://bmclapi2.bangbang93.com/forge/promos",
+                })
+            },
+        );
+        let versions_data = versions_data.map_err(|e| {
             anyhow::anyhow!(
                 "下载 Forge {} 安装器版本元数据失败：{:?}",
                 vanilla_version,
                 e
             )
         })?;
-        let (version_promo, mut info): (Vec<ForgePromoItem>, Vec<ForgeItemInfo>) =
-            futures::future::try_join(version_promo.body_json(), versions_data.body_json())
-                .await
-                .map_err(|e| anyhow::anyhow!(e))?;
+        let version_promo = version_promo.map_err(|e| {
+            anyhow::anyhow!(
+                "下载 Forge {} 安装器版本元数据失败：{:?}",
+                vanilla_version,
+                e
+            )
+        })?;
+        let (version_promo, info) = rayon::join(
+            || -> DynResult<Vec<ForgePromoItem>> { version_promo.into_json() },
+            || -> DynResult<Vec<ForgeItemInfo>> { versions_data.into_json() },
+        );
+        let version_promo = version_promo.map_err(|e| anyhow::anyhow!(e))?;
+        let mut info: Vec<ForgeItemInfo> = info.map_err(|e| anyhow::anyhow!(e))?;
 
         info.sort_by(|a, b| {
             let a: u64 = {
@@ -137,7 +146,7 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
         })
     }
 
-    async fn install_forge_pre(
+    fn install_forge_pre(
         &self,
         version_id: &str,
         vanilla_version: &str,
@@ -176,10 +185,7 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
             if std::path::Path::new(&full_path).is_file() {
                 return Ok(());
             }
-            inner_future::fs::create_dir_all(
-                &full_path[..full_path.rfind('/').unwrap_or(full_path.len())],
-            )
-            .await?;
+            fs_err::create_dir_all(&full_path[..full_path.rfind('/').unwrap_or(full_path.len())])?;
 
             r.set_message(format!("下载 Forge 安装覆盖包 {forge_version}"));
             r.add_max_progress(1.);
@@ -188,24 +194,20 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
                 match self.source {
                     DownloadSource::Default => format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-{suffix}.zip"),
                     DownloadSource::BMCLAPI => format!("https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-{suffix}.zip"),
-                    DownloadSource::MCBBS => format!("https://download.mcbbs.net/maven/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-{suffix}.zip"),
                     _ => format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-{suffix}.zip")
                 },
                 format!("https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-{suffix}.zip"),
-                format!("https://download.mcbbs.net/maven/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-{suffix}.zip"),
                 format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-{suffix}.zip"),
             ];
 
-            crate::http::download(&uris, &full_path, 0)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "下载 Forge {}-{} 安装覆盖包失败：{:?}",
-                        version_id,
-                        forge_version,
-                        e
-                    )
-                })?;
+            crate::http::download(&uris, &full_path, 0).map_err(|e| {
+                anyhow::anyhow!(
+                    "下载 Forge {}-{} 安装覆盖包失败：{:?}",
+                    version_id,
+                    forge_version,
+                    e
+                )
+            })?;
         } else {
             let full_path = format!(
                 "{root}/net/minecraftforge/forge/{mc}-{forge}/forge-{mc}-{forge}-installer.jar",
@@ -217,10 +219,7 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
             if std::path::Path::new(&full_path).is_file() {
                 return Ok(());
             }
-            inner_future::fs::create_dir_all(
-                &full_path[..full_path.rfind('/').unwrap_or(full_path.len())],
-            )
-            .await?;
+            fs_err::create_dir_all(&full_path[..full_path.rfind('/').unwrap_or(full_path.len())])?;
 
             r.set_message(format!("下载 Forge 安装器 {forge_version}"));
             r.add_max_progress(1.);
@@ -233,11 +232,9 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
                     match self.source {
                         DownloadSource::Default => format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-installer.jar"),
                         DownloadSource::BMCLAPI => format!("https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-installer.jar"),
-                        DownloadSource::MCBBS => format!("https://download.mcbbs.net/maven/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-installer.jar"),
                         _ => format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-installer.jar")
                     },
                     format!("https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-installer.jar"),
-                    format!("https://download.mcbbs.net/maven/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-installer.jar"),
                     format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-installer.jar"),
                 ]
             } else {
@@ -245,32 +242,28 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
                     match self.source {
                         DownloadSource::Default => format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-installer.jar"),
                         DownloadSource::BMCLAPI => format!("https://bmclapi2.bangbang93.com/forge/download/{build_id}"),
-                        DownloadSource::MCBBS => format!("https://download.mcbbs.net/forge/download/{build_id}"),
                         _ => format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-installer.jar")
                     },
                     format!("https://bmclapi2.bangbang93.com/forge/download/{build_id}"),
-                    format!("https://download.mcbbs.net/forge/download/{build_id}"),
                     format!("https://maven.minecraftforge.net/net/minecraftforge/forge/{vanilla_version}-{forge_version}/forge-{vanilla_version}-{forge_version}-installer.jar"),
                 ]
             };
 
-            crate::http::download(&uris, &full_path, 0)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "下载 Forge {}-{} 安装器失败：{:?}",
-                        version_id,
-                        forge_version,
-                        e
-                    )
-                })?;
+            crate::http::download(&uris, &full_path, 0).map_err(|e| {
+                anyhow::anyhow!(
+                    "下载 Forge {}-{} 安装器失败：{:?}",
+                    version_id,
+                    forge_version,
+                    e
+                )
+            })?;
         }
 
         r.add_progress(1.);
         Ok(())
     }
 
-    async fn install_forge_post(
+    fn install_forge_post(
         &self,
         version_name: &str,
         version_id: &str,
@@ -315,56 +308,57 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
                 version_name = version_name,
             );
 
-            inner_future::unblock(move || -> DynResult {
-                let full_file = std::fs::OpenOptions::new().read(true).open(&full_path)?;
-                let mut full_file = zip::ZipArchive::new(full_file)?;
+            let full_file = fs_err::OpenOptions::new().read(true).open(&full_path)?;
+            let mut full_file = zip::ZipArchive::new(full_file)?;
 
-                let override_file = std::fs::OpenOptions::new()
-                    .read(true)
-                    .open(&full_override_path)?;
-                let mut override_file = zip::ZipArchive::new(override_file)?;
+            let override_file = fs_err::OpenOptions::new()
+                .read(true)
+                .open(&full_override_path)?;
+            let mut override_file = zip::ZipArchive::new(override_file)?;
 
-                let temp_override_file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(&full_temp_override_path)?;
-                let mut temp_override_file = zip::ZipWriter::new(temp_override_file);
+            let temp_override_file = fs_err::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&full_temp_override_path)?;
+            let mut temp_override_file = zip::ZipWriter::new(temp_override_file);
 
-                for index in 0..override_file.len() {
-                    if let Ok(entry) = override_file.by_index(index) {
-                        if entry.name().starts_with("META-INF") {
-                            continue;
-                        } else if entry.is_file() {
-                            temp_override_file.raw_copy_file(entry)?;
-                        } else if entry.is_dir() {
-                            // tracing::trace!("Added dir {}", entry.name());
-                            temp_override_file.add_directory(entry.name(), Default::default())?;
-                        }
+            for index in 0..override_file.len() {
+                if let Ok(entry) = override_file.by_index(index) {
+                    if entry.name().starts_with("META-INF") {
+                        continue;
+                    } else if entry.is_file() {
+                        temp_override_file.raw_copy_file(entry)?;
+                    } else if entry.is_dir() {
+                        // tracing::trace!("Added dir {}", entry.name());
+                        temp_override_file.add_directory(
+                            entry.name(),
+                            zip::write::SimpleFileOptions::default(),
+                        )?;
                     }
                 }
+            }
 
-                for index in 0..full_file.len() {
-                    if let Ok(entry) = full_file.by_index(index) {
-                        if entry.name().starts_with("META-INF") {
-                            continue;
-                        } else if entry.is_file() {
-                            temp_override_file.raw_copy_file(entry)?;
-                        } else if entry.is_dir() {
-                            // tracing::trace!("Added dir {}", entry.name());
-                            temp_override_file.add_directory(entry.name(), Default::default())?;
-                        }
+            for index in 0..full_file.len() {
+                if let Ok(entry) = full_file.by_index(index) {
+                    if entry.name().starts_with("META-INF") {
+                        continue;
+                    } else if entry.is_file() {
+                        temp_override_file.raw_copy_file(entry)?;
+                    } else if entry.is_dir() {
+                        // tracing::trace!("Added dir {}", entry.name());
+                        temp_override_file.add_directory(
+                            entry.name(),
+                            zip::write::SimpleFileOptions::default(),
+                        )?;
                     }
                 }
+            }
 
-                temp_override_file.finish()?.sync_all()?;
+            temp_override_file.finish()?.sync_all()?;
 
-                std::fs::remove_file(&full_override_path)?;
-                std::fs::rename(full_temp_override_path, full_override_path)?;
-
-                Ok(())
-            })
-            .await?;
+            fs_err::remove_file(&full_override_path)?;
+            fs_err::rename(full_temp_override_path, full_override_path)?;
 
             Ok(())
         } else {
@@ -376,19 +370,8 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
                 self.minecraft_library_path.as_str()
             );
 
-            inner_future::fs::create_dir_all(
-                std::path::Path::new(&installer_path).parent().unwrap(),
-            )
-            .await?;
-            let mut file = inner_future::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&installer_path)
-                .await?;
-            file.write_all(FORGE_INSTALL_HELPER).await?;
-            let _ = file.flush().await;
-            let _ = file.sync_all().await;
+            fs_err::create_dir_all(std::path::Path::new(&installer_path).parent().unwrap())?;
+            fs_err::write(&installer_path, FORGE_INSTALL_HELPER)?;
 
             // TODO: 换成自己的安装代码
             // Run installer
@@ -407,30 +390,17 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
     );
             tracing::trace!("Writing temp forge installer from {full_path} to {tmp_full_path}");
             {
-                let version_name = version_name.to_owned();
-                let full_path = full_path.to_owned();
-                let tmp_full_path = tmp_full_path.to_owned();
-                let full_path_c = full_path.to_owned();
-                let tmp_full_path_c = tmp_full_path.to_owned();
-                let (from_file, to_file) = futures::future::try_join(
-                    inner_future::unblock(move || {
-                        std::fs::OpenOptions::new().read(true).open(full_path)
-                    }),
-                    inner_future::unblock(move || {
-                        std::fs::OpenOptions::new()
-                            .write(true)
-                            .create(true)
-                            .truncate(true)
-                            .open(tmp_full_path)
-                    }),
-                )
-                .await?;
+                let from_file = fs_err::OpenOptions::new().read(true).open(&full_path)?;
+                let to_file = fs_err::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&tmp_full_path)?;
                 tracing::trace!("Modifying");
-                self.modify_forge_installer(from_file, to_file, &version_name)
-                    .await
+                self.modify_forge_installer(from_file, to_file, version_name)
                     .with_context(|| {
                         format!(
-                            "修改 Forge 模组安装器文件 {full_path_c} 到 {tmp_full_path_c} 时发生错误"
+                            "修改 Forge 模组安装器文件 {full_path} 到 {tmp_full_path} 时发生错误"
                         )
                     })?;
             }
@@ -439,11 +409,11 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
             r.set_message("正在修改安装器参数".into());
 
             #[cfg(not(windows))]
-            let mut cmd = inner_future::process::Command::new(&self.java_path);
+            let mut cmd = std::process::Command::new(&self.java_path);
             #[cfg(windows)]
             let mut cmd = {
-                use inner_future::process::windows::CommandExt;
-                let mut cmd = inner_future::process::Command::new(&self.java_path);
+                use std::os::windows::process::CommandExt;
+                let mut cmd = std::process::Command::new(&self.java_path);
                 cmd.creation_flags(0x08000000);
                 cmd
             };
@@ -475,13 +445,12 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
             let mut delay_timer = Instant::now();
 
             if let Some(stdout) = child.stdout.take() {
-                let mut stdout = inner_future::io::BufReader::new(stdout);
+                let mut stdout = std::io::BufReader::new(stdout);
                 let mut buf = String::with_capacity(256);
                 loop {
-                    if let Ok(len) = stdout.read_line(&mut buf).await {
-                        if len == 0 {
-                            break;
-                        } else {
+                    match stdout.read_line(&mut buf) {
+                        Ok(0) => break,
+                        Ok(len) => {
                             let line = buf[..len].trim();
 
                             let delayed = delay_timer.elapsed() > Duration::from_millis(16);
@@ -524,6 +493,7 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
 
                             buf.clear()
                         }
+                        Err(_) => break,
                     }
                 }
             }
@@ -531,10 +501,10 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
             drop(ir);
             drop(pr);
 
-            let status = child.status().await?;
+            let status = child.wait()?;
             r.add_progress(1.);
             r.remove_progress();
-            inner_future::fs::remove_file(tmp_full_path).await?;
+            fs_err::remove_file(tmp_full_path)?;
             if status.success() && install_succeed.load(std::sync::atomic::Ordering::SeqCst) {
                 Ok(())
             } else {
@@ -548,10 +518,10 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
         }
     }
 
-    async fn modify_forge_installer(
+    fn modify_forge_installer(
         &self,
-        from_reader: std::fs::File,
-        to_writer: std::fs::File,
+        from_reader: fs_err::File,
+        to_writer: fs_err::File,
         name: &str,
     ) -> DynResult {
         tracing::trace!("Opening file");
@@ -587,7 +557,6 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
                                     DownloadSource::BMCLAPI => {
                                         "https://bmclapi2.bangbang93.com/maven"
                                     }
-                                    DownloadSource::MCBBS => "https://download.mcbbs.net/maven",
                                     _ => "https://files.minecraftforge.net",
                                 };
                                 if let Some(Value::Array(array)) = obj.get_mut("libraries") {
@@ -704,7 +673,10 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
                                 serde_json::to_string_pretty(&install_profile)?
                             );
                             let output = serde_json::to_vec_pretty(&install_profile)?;
-                            out_file.start_file(entry.name(), Default::default())?;
+                            out_file.start_file(
+                                entry.name(),
+                                zip::write::SimpleFileOptions::default(),
+                            )?;
                             out_file.write_all(&output)?;
                         }
                         _ => {
@@ -714,7 +686,8 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
                     }
                 } else if entry.is_dir() {
                     // tracing::trace!("Added dir {}", entry.name());
-                    out_file.add_directory(entry.name(), Default::default())?;
+                    out_file
+                        .add_directory(entry.name(), zip::write::SimpleFileOptions::default())?;
                 }
             }
         }

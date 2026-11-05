@@ -88,7 +88,7 @@ impl Widget<ModState> for ModListItem {
         if !old.same(new) {
             self.image = None;
             self.image_key = None;
-            // 图标是异步加载后写回 data 的，必须主动重绘，否则要等下一次鼠标事件才会出现。
+            // 图标是后台加载后写回 data 的，必须主动重绘，否则要等下一次鼠标事件才会出现。
             ctx.request_paint();
         }
     }

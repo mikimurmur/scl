@@ -73,45 +73,41 @@ pub struct SearchParams {
 }
 
 /// 根据模组 ID 获取可以下载的模组文件
-pub async fn get_mod_files(modid: &str) -> DynResult<Vec<ModVersion>> {
+pub fn get_mod_files(modid: &str) -> DynResult<Vec<ModVersion>> {
     crate::http::retry_get_json(format!(
         "https://api.modrinth.com/v2/project/{modid}/version"
     ))
-    .await
 }
 
 /// 根据模组 ID 获取模组信息
-pub async fn get_mod_info(modid: &str) -> DynResult<ModResult> {
-    crate::http::retry_get_json(format!("https://api.modrinth.com/v2/project/{modid}")).await
+pub fn get_mod_info(modid: &str) -> DynResult<ModResult> {
+    crate::http::retry_get_json(format!("https://api.modrinth.com/v2/project/{modid}"))
 }
 
 /// 根据模组 ID 获取模组图标
 ///
 /// 如果图标不存在则返回一个 1x1 的透明像素图片
-pub async fn get_mod_icon(modid: &str) -> DynResult<DynamicImage> {
-    let info = get_mod_info(modid).await?;
-    get_mod_icon_by_url(&info.icon_url).await
+pub fn get_mod_icon(modid: &str) -> DynResult<DynamicImage> {
+    let info = get_mod_info(modid)?;
+    get_mod_icon_by_url(&info.icon_url)
 }
 
 /// 根据模组图片直链获取模组图标
 ///
 /// 如果图标不存在则返回一个 1x1 的透明像素图片
-pub async fn get_mod_icon_by_url(url: &str) -> DynResult<DynamicImage> {
-    let img = get_mod_icon_by_url_inner(url).await?;
+pub fn get_mod_icon_by_url(url: &str) -> DynResult<DynamicImage> {
+    let img = get_mod_icon_by_url_inner(url)?;
     // 与官方一致：图标统一 resize_to_fill 到 64x64（见 curseforge::get_mod_icon_url 注释）
     Ok(img.resize_to_fill(64, 64, image::imageops::FilterType::Triangle))
 }
 
-async fn get_mod_icon_by_url_inner(url: &str) -> DynResult<DynamicImage> {
+fn get_mod_icon_by_url_inner(url: &str) -> DynResult<DynamicImage> {
     if url.is_empty() {
         let mut img = image::RgbaImage::new(1, 1);
         img.put_pixel(0, 0, image::Rgba([0xFF, 0xFF, 0xFF, 0]));
         return Ok(image::DynamicImage::ImageRgba8(img));
     }
-    let data = crate::http::get(url)
-        .recv_bytes()
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let data = crate::http::get(url).call()?.into_bytes()?;
     // Modrinth 允许的图片格式有： .bmp .gif .jpeg .png .svg .svgz .webp .rgb
     if url.ends_with(".webp") {
         // 使用 webp 读取
@@ -151,7 +147,7 @@ async fn get_mod_icon_by_url_inner(url: &str) -> DynResult<DynamicImage> {
 }
 
 /// 根据搜索参数搜索模组
-pub async fn search_mods(
+pub fn search_mods(
     SearchParams {
         search_filter,
         index,
@@ -165,11 +161,8 @@ pub async fn search_mods(
         page_size,
         search_filter
     ))
-    .recv_json()
-    .await
-    // 与 CurseForge 侧一致：into_inner 保留底层 serde 错误链，
-    // 异步错误弹窗显示官方同款 Debug 形态。
-    .map_err(surf::Error::into_inner)?;
+    .call()?
+    .into_json()?;
     Ok(r.hits
         .into_iter()
         .map(|mut a| {

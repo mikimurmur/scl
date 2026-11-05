@@ -2,10 +2,10 @@
 
 use std::{
     fmt::Display,
+    io::Read,
     path::{Path, PathBuf},
 };
 
-use inner_future::io::{AsyncRead, AsyncReadExt};
 use sha1_smol::*;
 
 use crate::prelude::*;
@@ -81,15 +81,18 @@ pub const CLASSPATH_SEPARATOR: &str = ":";
 
 /// 一个内存页面位移值，仅 MacOS 用，用于自动内存计算
 #[cfg(target_os = "macos")]
-pub static PAGESHIFT: once_cell::sync::Lazy<libc::c_int> = once_cell::sync::Lazy::new(|| {
-    let mut pagesize = unsafe { getpagesize() };
-    let mut pageshift = 0;
-    while pagesize > 1 {
-        pageshift += 1;
-        pagesize >>= 1;
-    }
-    pageshift - 10 // LOG1024
-});
+pub fn pageshift() -> libc::c_int {
+    static PAGESHIFT: std::sync::OnceLock<libc::c_int> = std::sync::OnceLock::new();
+    *PAGESHIFT.get_or_init(|| {
+        let mut pagesize = unsafe { getpagesize() };
+        let mut pageshift = 0;
+        while pagesize > 1 {
+            pageshift += 1;
+            pagesize >>= 1;
+        }
+        pageshift - 10 // LOG1024
+    })
+}
 
 #[cfg(target_os = "macos")]
 #[link(name = "c")]
@@ -97,14 +100,14 @@ extern "C" {
     fn getpagesize() -> libc::c_int;
 }
 
-/// 异步计算一个数据的 SHA1 摘要值
+/// 计算一个数据的 SHA1 摘要值
 ///
 /// 返回一个十六进制的小写摘要字符串
-pub async fn get_data_sha1(data: &mut (impl AsyncRead + Unpin)) -> DynResult<String> {
+pub fn get_data_sha1(data: &mut impl Read) -> DynResult<String> {
     let mut buf = [0u8; 16];
     let mut sha = Sha1::default();
     loop {
-        let size = data.read(&mut buf).await?;
+        let size = data.read(&mut buf)?;
         if size > 0 {
             sha.update(&buf[..size]);
         } else {
@@ -114,9 +117,26 @@ pub async fn get_data_sha1(data: &mut (impl AsyncRead + Unpin)) -> DynResult<Str
     Ok(sha.hexdigest())
 }
 
+/// 按当前平台规则切割命令行参数。
+///
+/// - Windows 使用 `winsplit`（VC++ 2008 命令行解析规则）；
+/// - 其它平台使用 `shlex`（POSIX shell 规则）。
+///
+/// 解析失败（如未闭合引号）返回 `None`，由调用方决定回退行为。
+pub fn split_command_line(args: &str) -> Option<Vec<String>> {
+    #[cfg(windows)]
+    {
+        Some(winsplit::split(args))
+    }
+    #[cfg(not(windows))]
+    {
+        shlex::split(args)
+    }
+}
+
 /// 返回一个相对路径的绝对路径格式
 ///
-/// 因为标准库的 [`std::fs::canonicalize`] 不支持不存在的路径的解析，所以做了这个
+/// 因为标准库的 [`fs_err::canonicalize`] 不支持不存在的路径的解析，所以做了这个
 ///
 /// 用于启动参数的路径绝对化
 pub fn get_full_path(p: impl AsRef<std::path::Path>) -> String {
@@ -230,8 +250,10 @@ impl AsRef<str> for Arch {
 /// 一个延迟获取的当前系统的架构
 ///
 /// 这个会获取到系统自身的架构，而非软件自身的编译目标架构
-pub static NATIVE_ARCH_LAZY: once_cell::sync::Lazy<Arch> =
-    once_cell::sync::Lazy::new(get_system_arch);
+pub fn native_arch() -> Arch {
+    static NATIVE_ARCH_LAZY: std::sync::OnceLock<Arch> = std::sync::OnceLock::new();
+    *NATIVE_ARCH_LAZY.get_or_init(get_system_arch)
+}
 
 fn get_system_arch() -> Arch {
     #[cfg(windows)]
@@ -274,17 +296,14 @@ pub struct MemoryStatus {
 /// - 对于 MacOS 的可执行文件格式描述，请参阅 "OS X ABI Mach-O File Format Reference"
 /// - 对于 Linux 的可执行文件格式描述，请参阅 "ELF-64 Object File Format"
 #[cfg(target_os = "windows")]
-pub async fn get_exec_arch(file_path: impl AsRef<std::path::Path>) -> DynResult<Arch> {
-    use inner_future::io::AsyncSeekExt;
+pub fn get_exec_arch(file_path: impl AsRef<std::path::Path>) -> DynResult<Arch> {
+    use std::io::{Seek, SeekFrom};
 
-    let mut file = inner_future::fs::OpenOptions::new()
-        .read(true)
-        .open(file_path.as_ref())
-        .await?;
+    let mut file = fs_err::File::open(file_path.as_ref())?;
 
     let mut buf = [0u8; 2];
 
-    file.read_exact(&mut buf).await?;
+    file.read_exact(&mut buf)?;
 
     // PE Magic Number
 
@@ -292,18 +311,17 @@ pub async fn get_exec_arch(file_path: impl AsRef<std::path::Path>) -> DynResult<
         anyhow::bail!("文件不是一个合法的 PE 可执行文件");
     }
 
-    file.seek(inner_future::io::SeekFrom::Start(0x3C)).await?;
+    file.seek(SeekFrom::Start(0x3C))?;
 
     let mut buf = [0u8; 4];
 
-    file.read_exact(&mut buf).await?;
+    file.read_exact(&mut buf)?;
 
     let pe_header_offset = u32::from_le_bytes(buf);
 
-    file.seek(inner_future::io::SeekFrom::Start(pe_header_offset as u64))
-        .await?;
+    file.seek(SeekFrom::Start(pe_header_offset as u64))?;
 
-    file.read_exact(&mut buf).await?;
+    file.read_exact(&mut buf)?;
 
     if !(buf[0] == 0x50 && buf[1] == 0x45 && buf[2] == 0x00 && buf[3] == 0x00) {
         anyhow::bail!("文件不是一个合法的 PE 可执行文件");
@@ -311,7 +329,7 @@ pub async fn get_exec_arch(file_path: impl AsRef<std::path::Path>) -> DynResult<
 
     let mut buf = [0u8; 2];
 
-    file.read_exact(&mut buf).await?;
+    file.read_exact(&mut buf)?;
 
     match buf {
         [0x4C, 0x01] => Ok(Arch::X86),   // X86 I386
@@ -329,15 +347,12 @@ pub async fn get_exec_arch(file_path: impl AsRef<std::path::Path>) -> DynResult<
 /// - 对于 MacOS 的可执行文件格式描述，请参阅 "OS X ABI Mach-O File Format Reference"
 /// - 对于 Linux 的可执行文件格式描述，请参阅 "ELF-64 Object File Format"
 #[cfg(target_os = "macos")]
-pub async fn get_exec_arch(file_path: impl AsRef<std::path::Path>) -> DynResult<Arch> {
-    let mut file = inner_future::fs::OpenOptions::new()
-        .read(true)
-        .open(file_path.as_ref())
-        .await?;
+pub fn get_exec_arch(file_path: impl AsRef<std::path::Path>) -> DynResult<Arch> {
+    let mut file = fs_err::File::open(file_path.as_ref())?;
 
     let mut buf = [0u8; 8];
 
-    file.read_exact(&mut buf).await?;
+    file.read_exact(&mut buf)?;
 
     // 多架构 Mach-O，默认取当前运行架构
     // 一般出现于 /usr/bin/java 中
@@ -367,16 +382,13 @@ pub async fn get_exec_arch(file_path: impl AsRef<std::path::Path>) -> DynResult<
 /// - 对于 MacOS 的可执行文件格式描述，请参阅 "OS X ABI Mach-O File Format Reference"
 /// - 对于 Linux 的可执行文件格式描述，请参阅 "ELF-64 Object File Format"
 #[cfg(target_os = "linux")]
-pub async fn get_exec_arch(file_path: impl AsRef<std::path::Path>) -> DynResult<Arch> {
-    use inner_future::io::AsyncSeekExt;
+pub fn get_exec_arch(file_path: impl AsRef<std::path::Path>) -> DynResult<Arch> {
+    use std::io::{Seek, SeekFrom};
 
-    let mut file = inner_future::fs::OpenOptions::new()
-        .read(true)
-        .open(file_path.as_ref())
-        .await?;
+    let mut file = fs_err::File::open(file_path.as_ref())?;
 
     let mut buf = [0u8; 4];
-    file.read_exact(&mut buf).await?;
+    file.read_exact(&mut buf)?;
 
     // ELF Magic Number
     // 7F 45 4C 46
@@ -384,13 +396,13 @@ pub async fn get_exec_arch(file_path: impl AsRef<std::path::Path>) -> DynResult<
         anyhow::bail!("文件不是一个合法的 ELF 可执行文件");
     }
 
-    file.seek(inner_future::io::SeekFrom::Start(0x10)).await?;
+    file.seek(SeekFrom::Start(0x10))?;
 
     let mut buf = [0u8; 2];
-    file.read_exact(&mut buf).await?;
+    file.read_exact(&mut buf)?;
 
     let elf_type = u16::from_le_bytes(buf);
-    file.read_exact(&mut buf).await?;
+    file.read_exact(&mut buf)?;
     let arch = u16::from_le_bytes(buf);
 
     if elf_type != 0x02 && elf_type != 0x03 {
@@ -425,7 +437,7 @@ pub fn get_mem_status() -> MemoryStatus {
     }
     #[cfg(target_os = "linux")]
     {
-        let stat = std::fs::read_to_string("/proc/meminfo").unwrap();
+        let stat = fs_err::read_to_string("/proc/meminfo").unwrap();
         let mut max = None;
         let mut free = None;
         for line in stat.lines() {
@@ -483,8 +495,8 @@ pub fn get_mem_status() -> MemoryStatus {
             let stat = stat.assume_init();
 
             MemoryStatus {
-                max: ((total as u64) << *PAGESHIFT) / 1024,
-                free: (((stat.inactive_count + stat.free_count) as u64) << *PAGESHIFT) / 1024,
+                max: ((total as u64) << pageshift()) / 1024,
+                free: (((stat.inactive_count + stat.free_count) as u64) << pageshift()) / 1024,
             }
         }
     }

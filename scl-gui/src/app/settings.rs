@@ -12,8 +12,8 @@ use crate::{
 pub fn check_update(ctx: &EventCtx, data: &mut AppState) {
     data.setting_about_update_logs = Some("检查更新中……".into());
     let sink = ctx.get_external_handle();
-    thread_main(async move {
-        match update::latest_version().await {
+    thread_main(move || {
+        match update::latest_version() {
             Ok(version) => {
                 // 官方关于页检查更新只请求 latest 并立刻把整段响应体当作版本号，
                 // 不等待更新记录拉取；先提交版本让关于页立即收敛（Cloudflare
@@ -23,7 +23,7 @@ pub fn check_update(ctx: &EventCtx, data: &mut AppState) {
                     AppEvent::UpdateChecked(Ok((version.clone(), String::new()))),
                     Target::Global,
                 );
-                let logs = update::fetch_update_logs(&version).await;
+                let logs = update::fetch_update_logs(&version);
                 let _ = sink.submit_command(
                     APP_EVENT,
                     AppEvent::UpdateChecked(Ok((version, logs))),
@@ -45,8 +45,8 @@ pub fn check_update(ctx: &EventCtx, data: &mut AppState) {
 /// 下载最新版并启动内置更新器覆盖当前程序，成功后退出启动器
 pub fn update_now(ctx: &EventCtx, _data: &mut AppState) {
     let sink = ctx.get_external_handle();
-    thread_main(async move {
-        let result = update::self_update().await;
+    thread_main(move || {
+        let result = update::self_update();
         let _ = sink.submit_command(
             APP_EVENT,
             AppEvent::UpdateFinished(result.map_err(|err| format!("{err:?}"))),

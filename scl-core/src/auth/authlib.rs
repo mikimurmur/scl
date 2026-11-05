@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use anyhow::Context;
 use base64::prelude::*;
-use surf::StatusCode;
+use rayon::prelude::*;
 
 use crate::{
     auth::structs::{mojang::*, AuthMethod},
@@ -42,13 +42,12 @@ pub(crate) struct RefreshBody {
     pub selected_profile: Option<AvaliableProfile>,
 }
 
-async fn get_head_skin(api_location: &str, uuid: &str) -> DynResult<(Vec<u8>, Vec<u8>)> {
+fn get_head_skin(api_location: &str, uuid: &str) -> DynResult<(Vec<u8>, Vec<u8>)> {
     let uri = format!("{api_location}sessionserver/session/minecraft/profile/{uuid}");
     let result: ProfileResponse = crate::http::no_retry::get(&uri)
-        .await
+        .call()
         .map_err(|e| anyhow::anyhow!("发送获取皮肤请求到 {} 时发生错误：{:?}", uri, e))?
-        .body_json()
-        .await
+        .into_json()
         .map_err(|e| anyhow::anyhow!("接收获取皮肤响应到 {} 时发生错误：{:?}", uri, e))?;
     if let Some(prop) = result
         .properties
@@ -63,8 +62,9 @@ async fn get_head_skin(api_location: &str, uuid: &str) -> DynResult<(Vec<u8>, Ve
                 let skin_url = skin.url;
                 crate::auth::parse_head_skin(
                     crate::http::no_retry::get(skin_url)
-                        .recv_bytes()
-                        .await
+                        .call()
+                        .map_err(|e| anyhow::anyhow!(e))?
+                        .into_bytes()
                         .map_err(|e| anyhow::anyhow!(e))?,
                 )
             } else {
@@ -81,7 +81,7 @@ async fn get_head_skin(api_location: &str, uuid: &str) -> DynResult<(Vec<u8>, Ve
 /// 根据初次登陆/二次验证取得的用户令牌，刷新验证出可供正常游戏的登录令牌
 ///
 /// 详情参考[启动器技术规范](https://github.com/yushijinhun/authlib-injector/wiki/Yggdrasil-%E6%9C%8D%E5%8A%A1%E7%AB%AF%E6%8A%80%E6%9C%AF%E8%A7%84%E8%8C%83#%E5%88%B7%E6%96%B0)
-pub async fn refresh_token(
+pub fn refresh_token(
     auth_method: AuthMethod,
     client_token: &str,
     provide_selected_profile: bool,
@@ -113,7 +113,6 @@ pub async fn refresh_token(
                 },
             },
         )
-        .await
         .context("无法请求刷新令牌接口")?;
 
         match res {
@@ -123,8 +122,7 @@ pub async fn refresh_token(
                     id: uuid.to_owned(),
                 });
 
-                let (head_skin, hat_skin) =
-                    get_head_skin(&api_location, &selected_profile.id).await?;
+                let (head_skin, hat_skin) = get_head_skin(&api_location, &selected_profile.id)?;
 
                 let refreshed_method = AuthMethod::AuthlibInjector {
                     api_location: api_location.to_owned(),
@@ -163,7 +161,7 @@ pub async fn refresh_token(
 ///
 /// 如果验证成功，则会返回这个账户旗下所有角色。
 /// 如果用户名和角色名称一致，则只会返回那个角色。
-pub async fn start_auth(
+pub fn start_auth(
     _ctx: Option<impl Reporter>,
     authlib_host: &str,
     username: String,
@@ -173,10 +171,10 @@ pub async fn start_auth(
     // 找到 API 地址，使用 ALI
     let api_location = {
         let a = crate::http::get(authlib_host)
-            .await
+            .call()
             .map_err(|_| anyhow::anyhow!("无法请求 Authlib API 服务器：{}", authlib_host))?;
         if let Some(h) = a.header("X-Authlib-Injector-API-Location") {
-            h.last().to_string()
+            h.to_owned()
         } else {
             authlib_host.to_owned()
         }
@@ -200,7 +198,6 @@ pub async fn start_auth(
     let api_location_url = url::Url::from_str(&api_location)?;
 
     let meta_res: RequestResult<APIMetaData> = crate::http::no_retry::get_data(&api_location)
-        .await
         .map_err(|e| anyhow::anyhow!("无法接收 Authlib 服务器元数据响应：{:?}", e))?;
 
     let (server_name, server_homepage) = if let RequestResult::Ok(meta) = meta_res {
@@ -230,8 +227,9 @@ pub async fn start_auth(
     };
 
     let server_meta = crate::http::no_retry::get(&api_location)
-        .recv_bytes()
-        .await
+        .call()
+        .map_err(|e| anyhow::anyhow!("无法接收登录接口元数据：{:?}", e))?
+        .into_bytes()
         .map_err(|e| anyhow::anyhow!("无法接收登录接口元数据：{:?}", e))?;
     let server_meta = BASE64_STANDARD.encode(server_meta);
 
@@ -245,15 +243,13 @@ pub async fn start_auth(
     };
     let resp: RequestResult<AuthenticateResponse> =
         crate::http::no_retry::post_data(&auth_url, &auth_body)
-            .await
             .map_err(|e| anyhow::anyhow!("无法解析登录接口回调：{} {:?}", auth_url, e))?;
 
     match resp {
         RequestResult::Ok(a) => {
             if let Some(selected_profile) = a.selected_profile {
                 if selected_profile.name == username {
-                    let (head_skin, hat_skin) =
-                        get_head_skin(&api_location, &selected_profile.id).await?;
+                    let (head_skin, hat_skin) = get_head_skin(&api_location, &selected_profile.id)?;
                     return Ok(vec![AuthMethod::AuthlibInjector {
                         api_location,
                         server_name,
@@ -269,7 +265,7 @@ pub async fn start_auth(
             }
             if !a.available_profiles.is_empty() {
                 if let Some(profile) = a.available_profiles.iter().find(|x| x.name == username) {
-                    let (head_skin, hat_skin) = get_head_skin(&api_location, &profile.id).await?;
+                    let (head_skin, hat_skin) = get_head_skin(&api_location, &profile.id)?;
                     return Ok(vec![AuthMethod::AuthlibInjector {
                         api_location,
                         server_name,
@@ -283,10 +279,11 @@ pub async fn start_auth(
                     }]);
                 }
 
-                let skins_threads =
-                    futures::future::join_all(a.available_profiles.into_iter().map(|x| async {
+                let skins_threads: Vec<AuthMethod> = a
+                    .available_profiles
+                    .into_par_iter()
+                    .map(|x| {
                         let (head_skin, hat_skin) = get_head_skin(&api_location, &x.id)
-                            .await
                             .unwrap_or_else(|_| (vec![0; 2 * 4 * 64], vec![0; 2 * 4 * 64]));
                         AuthMethod::AuthlibInjector {
                             api_location: api_location.to_owned(),
@@ -299,8 +296,8 @@ pub async fn start_auth(
                             head_skin,
                             hat_skin,
                         }
-                    }))
-                    .await;
+                    })
+                    .collect();
                 Ok(skins_threads)
             } else {
                 anyhow::bail!("该账户没有可用的角色！")
@@ -321,19 +318,15 @@ pub async fn start_auth(
 }
 
 /// 验证对应的访问令牌和当前启动器令牌是否可以用于现在进行游戏
-pub async fn validate(
-    api_location: &str,
-    access_token: &str,
-    client_token: &str,
-) -> DynResult<bool> {
+pub fn validate(api_location: &str, access_token: &str, client_token: &str) -> DynResult<bool> {
     let post_url = url::Url::parse(api_location)?.join("authserver/validate")?;
-    let resp = crate::http::post(post_url)
+    let resp = crate::http::post(post_url.to_string())
         .body_json(&ValidateResponse {
             access_token: access_token.into(),
             client_token: client_token.to_owned(),
         })
         .map_err(|_| anyhow::anyhow!("无法序列化请求"))?
-        .await
+        .call()
         .map_err(|_| anyhow::anyhow!("无法请求 Authlib API 服务器：{}", api_location))?;
-    Ok(resp.status() == StatusCode::NoContent)
+    Ok(resp.status() == 204)
 }

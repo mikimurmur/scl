@@ -88,12 +88,13 @@ impl VersionType {
 #[derive(Debug, Clone, PartialEq, Eq, Data, Serialize, Deserialize, Default)]
 pub enum DownloadSource {
     /// 官方下载源
+    ///
+    /// 兼容旧配置：已失效的 MCBBS 下载源在反序列化时回退到默认源。
     #[default]
+    #[serde(alias = "Mcbbs")]
     Default,
     /// BMCLAPI 下载源
     BmclApi,
-    /// MCBBS 下载源
-    Mcbbs,
 }
 
 impl DownloadSource {
@@ -102,7 +103,6 @@ impl DownloadSource {
         match self {
             Self::Default => "官方下载源",
             Self::BmclApi => "BMCLAPI 下载源",
-            Self::Mcbbs => "MCBBS 下载源",
         }
     }
 
@@ -111,7 +111,6 @@ impl DownloadSource {
         match self {
             Self::Default => CoreDownloadSource::Default,
             Self::BmclApi => CoreDownloadSource::BMCLAPI,
-            Self::Mcbbs => CoreDownloadSource::MCBBS,
         }
     }
 }
@@ -125,7 +124,6 @@ impl CoreTransformer<CoreDownloadSource> for DownloadSource {
         match core {
             CoreDownloadSource::Default | CoreDownloadSource::Custom(_) => Self::Default,
             CoreDownloadSource::BMCLAPI => Self::BmclApi,
-            CoreDownloadSource::MCBBS => Self::Mcbbs,
         }
     }
 }

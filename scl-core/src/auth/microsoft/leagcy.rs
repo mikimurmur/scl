@@ -90,15 +90,16 @@ pub(super) struct MinecraftXBoxProfileResponse1 {
 }
 
 /// 获取 XUID，用途不明，但是在新版本的 Minecraft 有发现需要使用这个 XUID 的地方
-pub async fn get_xuid(userhash: &str, token: &str) -> DynResult<String> {
+pub fn get_xuid(userhash: &str, token: &str) -> DynResult<String> {
     let res = crate::http::get("https://userpresence.xboxlive.com/users/me?level=user")
-        .header("Authorization", format!("XBL3.0 x={userhash};{token}"))
+        .header("Authorization", &format!("XBL3.0 x={userhash};{token}"))
         .header("x-xbl-contract-version", "3.2")
         .header("Accept", "application/json")
         .header("Accept-Language", "zh-CN")
         .header("Host", "userpresence.xboxlive.com")
-        .recv_string()
-        .await
+        .call()
+        .map_err(|e| anyhow::anyhow!(e))?
+        .into_string()
         .map_err(|e| anyhow::anyhow!(e))?;
     Ok(res)
 }
@@ -108,7 +109,7 @@ pub async fn get_xuid(userhash: &str, token: &str) -> DynResult<String> {
 /// 如果请求一个新令牌，则 credit 为从登录页面里传来的 code 请求字符串
 ///
 /// 如果续期一个令牌，则 credit 为需要续期的旧令牌
-pub async fn request_token(credit: &str, is_refresh: bool) -> DynResult<(Password, String)> {
+pub fn request_token(credit: &str, is_refresh: bool) -> DynResult<(Password, String)> {
     let body = format!(
         "client_id={}&{}={}&grant_type={}&redirect_uri=https%3A%2F%2Flogin.live.com%2Foauth20_desktop.srf&scope=service%3A%3Auser.auth.xboxlive.com%3A%3AMBI_SSL",
         CLIENT_ID,
@@ -119,8 +120,9 @@ pub async fn request_token(credit: &str, is_refresh: bool) -> DynResult<(Passwor
     let res: OAuth20TokenResponse = crate::http::post(MICROSOFT_TOKEN_URL)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body.as_bytes())
-        .recv_json()
-        .await
+        .call()
+        .map_err(|e| anyhow::anyhow!(e))?
+        .into_json()
         .map_err(|e| anyhow::anyhow!(e))?;
     anyhow::ensure!(
         res.error.is_empty(),
@@ -134,7 +136,7 @@ pub async fn request_token(credit: &str, is_refresh: bool) -> DynResult<(Passwor
 /// 根据微软登录传回的访问令牌 access_token 返回 user_hash 和 xsts_token
 ///
 /// 传递给 [`get_mojang_access_token`] 进行下一步验证
-pub async fn get_userhash_and_token(access_token: &str) -> DynResult<(String, String)> {
+pub fn get_userhash_and_token(access_token: &str) -> DynResult<(String, String)> {
     // tracing::trace!("Getting xbox auth body");
     let xbox_auth_body = format!("{{\"Properties\":{{\"AuthMethod\":\"RPS\",\"SiteName\":\"user.auth.xboxlive.com\",\"RpsTicket\":\"{access_token}\"}},\"RelyingParty\":\"http://auth.xboxlive.com\",\"TokenType\":\"JWT\"}}");
     let xbox_auth_resp: XBoxAuthResponse =
@@ -142,10 +144,9 @@ pub async fn get_userhash_and_token(access_token: &str) -> DynResult<(String, St
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .body(xbox_auth_body.as_bytes())
-            .await
+            .call()
             .map_err(|e| anyhow::anyhow!(e))?
-            .body_json()
-            .await
+            .into_json()
             .map_err(|e| anyhow::anyhow!(e))?;
     let token = xbox_auth_resp.token.to_owned();
     if let Some(uhs) = xbox_auth_resp.display_claims.xui.first() {
@@ -157,10 +158,9 @@ pub async fn get_userhash_and_token(access_token: &str) -> DynResult<(String, St
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
                 .body(xsts_body.as_bytes())
-                .await
+                .call()
                 .map_err(|e| anyhow::anyhow!(e))?
-                .body_json()
-                .await
+                .into_json()
                 .map_err(|e| anyhow::anyhow!(e))?;
         let xsts_token = xsts_resp.token;
         Ok((uhs, xsts_token))
@@ -172,7 +172,7 @@ pub async fn get_userhash_and_token(access_token: &str) -> DynResult<(String, St
 /// 通过 [`get_userhash_and_token`] 返回的 `userhash` 和 `xsts_token` 获取 Mojang 的访问令牌
 ///
 /// 在拥有 Minecraft 游戏的情况下，此令牌可用于正版启动游戏
-pub async fn get_mojang_access_token(uhs: &str, xsts_token: &str) -> DynResult<Password> {
+pub fn get_mojang_access_token(uhs: &str, xsts_token: &str) -> DynResult<Password> {
     if !uhs.is_empty() && !xsts_token.is_empty() {
         // tracing::trace!("Getting mojang access token");
         let minecraft_xbox_body = format!("{{\"identityToken\":\"XBL3.0 x={uhs};{xsts_token}\"}}");
@@ -181,10 +181,9 @@ pub async fn get_mojang_access_token(uhs: &str, xsts_token: &str) -> DynResult<P
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json")
                 .body(minecraft_xbox_body.as_bytes())
-                .await
+                .call()
                 .map_err(|e| anyhow::anyhow!(e))?
-                .body_string()
-                .await
+                .into_string()
                 .map_err(|e| anyhow::anyhow!(e))?;
         let minecraft_xbox_resp: MinecraftXBoxLoginResponse =
             serde_json::from_str(&minecraft_xbox_resp)?;
@@ -197,7 +196,7 @@ pub async fn get_mojang_access_token(uhs: &str, xsts_token: &str) -> DynResult<P
 }
 
 /// 刷新登录令牌，如刷新成功则可将更新后的用户继续用于正版启动
-pub async fn refresh_auth(method: &mut AuthMethod) -> DynResult {
+pub fn refresh_auth(method: &mut AuthMethod) -> DynResult {
     match method {
         AuthMethod::Microsoft {
             access_token,
@@ -205,9 +204,9 @@ pub async fn refresh_auth(method: &mut AuthMethod) -> DynResult {
             ..
         } => {
             let (new_access_token, new_refresh_token) =
-                request_token(refresh_token.as_str(), true).await?;
-            let (uhs, xsts_token) = get_userhash_and_token(&new_access_token).await?;
-            let new_access_token = get_mojang_access_token(&uhs, &xsts_token).await?;
+                request_token(refresh_token.as_str(), true)?;
+            let (uhs, xsts_token) = get_userhash_and_token(&new_access_token)?;
+            let new_access_token = get_mojang_access_token(&uhs, &xsts_token)?;
             anyhow::ensure!(
                 !new_access_token.is_empty(),
                 "刷新令牌失败: {}",
@@ -224,13 +223,13 @@ pub async fn refresh_auth(method: &mut AuthMethod) -> DynResult {
 }
 
 /// 执行微软登录，需要形如 `https://login.live.com/oauth20_desktop.srf?code=[ANYCODE]&lc=1033` 的链接作为参数
-pub async fn start_auth(_ctx: Option<impl Reporter>, url: &str) -> DynResult<AuthMethod> {
+pub fn start_auth(_ctx: Option<impl Reporter>, url: &str) -> DynResult<AuthMethod> {
     let url = url.parse::<url::Url>()?;
     if let Some((_, code)) = url.query_pairs().find(|a| a.0 == "code") {
-        let (access_token, refresh_token) = request_token(&code, false).await?;
-        let (uhs, xsts_token) = get_userhash_and_token(&access_token).await?;
-        let xuid = get_xuid(&uhs, &xsts_token).await?;
-        let access_token = get_mojang_access_token(&uhs, &xsts_token).await?;
+        let (access_token, refresh_token) = request_token(&code, false)?;
+        let (uhs, xsts_token) = get_userhash_and_token(&access_token)?;
+        let xuid = get_xuid(&uhs, &xsts_token)?;
+        let access_token = get_mojang_access_token(&uhs, &xsts_token)?;
         if access_token.is_empty() {
             return Err(anyhow::anyhow!("获取令牌失败"));
         } else {
@@ -238,12 +237,11 @@ pub async fn start_auth(_ctx: Option<impl Reporter>, url: &str) -> DynResult<Aut
                 crate::http::get("https://api.minecraftservices.com/entitlements/mcstore")
                     .header(
                         "Authorization",
-                        format!("Bearer {}", access_token.as_string()),
+                        &format!("Bearer {}", access_token.as_string()),
                     )
-                    .await
+                    .call()
                     .map_err(|e| anyhow::anyhow!(e))?
-                    .body_json()
-                    .await
+                    .into_json()
                     .map_err(|e| anyhow::anyhow!(e))?;
             if mcstore_resp.items.is_empty() {
                 anyhow::bail!(
@@ -254,20 +252,18 @@ pub async fn start_auth(_ctx: Option<impl Reporter>, url: &str) -> DynResult<Aut
                 crate::http::get("https://api.minecraftservices.com/minecraft/profile")
                     .header(
                         "Authorization",
-                        format!("Bearer {}", access_token.as_string()),
+                        &format!("Bearer {}", access_token.as_string()),
                     )
-                    .await
+                    .call()
                     .map_err(|e| anyhow::anyhow!(e))?
-                    .body_json()
-                    .await
+                    .into_json()
                     .map_err(|e| anyhow::anyhow!(e))?;
             if profile_resp.error.is_empty() {
                 if let Some(skin) = profile_resp.skins.iter().find(|a| a.state == "ACTIVE") {
                     let skin_data = crate::http::get(&skin.url)
-                        .await
+                        .call()
                         .map_err(|e| anyhow::anyhow!(e))?
-                        .body_bytes()
-                        .await
+                        .into_bytes()
                         .map_err(|e| anyhow::anyhow!(e))?;
                     let (head_skin, hat_skin) = parse_head_skin(skin_data)?;
                     tracing::trace!("Successfully authed!");

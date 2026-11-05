@@ -12,7 +12,15 @@ pub mod quiltmc;
 pub mod structs;
 pub mod vanilla;
 
-use std::{fmt::Display, path::Path, str::FromStr, time::Duration};
+use std::{
+    fmt::Display,
+    path::Path,
+    str::FromStr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, OnceLock,
+    },
+};
 
 use anyhow::Context;
 pub use authlib::AuthlibDownloadExt;
@@ -21,29 +29,54 @@ pub use forge::ForgeDownloadExt;
 pub use neoforge::NeoForgeDownloadExt;
 pub use optifine::OptifineDownloadExt;
 pub use quiltmc::QuiltMCDownloadExt;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 pub use vanilla::VanillaDownloadExt;
 
 use self::structs::VersionInfo;
 use crate::{path::*, prelude::*, progress::*};
 
-/// 对一次网络操作施加兜底超时，超时返回 `None`
+/// 下载线程池的线程数上限
 ///
-/// `surf` 的 h1 客户端（async-h1）只在 HTTP 握手阶段套用 `Config::timeout`，
-/// 真正建立 TCP 连接时是裸 `TcpStream::connect`，没有超时（http-client 6.5.3
-/// `h1/mod.rs` 中 `connect` 位于 timeout 包裹之外）。镜像源返回的 302 跳转
-/// 目标一旦不可达，连接会一直停在 SYN-SENT，整个下载任务（含修复任务）随之
-/// 永久挂起。这里给每个源一次有界等待，超时后继续尝试下一个源，保证任务
-/// 在失败时也能收敛。
-pub(crate) async fn timeout_after<F>(duration: Duration, future: F) -> Option<F::Output>
+/// 下载属于阻塞 I/O，不受 CPU 核数限制；默认并发量也是 64。
+const DOWNLOAD_THREADS: usize = 64;
+
+/// 全局下载线程池（rayon）
+pub(crate) fn download_pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(DOWNLOAD_THREADS)
+            .thread_name(|index| format!("scl-download-{index}"))
+            .build()
+            .expect("创建下载线程池失败")
+    })
+}
+
+/// 在下载线程池中并行执行一组任务，并按 `parallel_amount` 分批限制并发。
+///
+/// `parallel_amount == 0` 表示不限制（一次性提交全部任务）。
+pub(crate) fn run_parallel_tasks<T, E>(
+    parallel_amount: usize,
+    tasks: &[T],
+    f: impl Fn(&T) -> Result<(), E> + Sync + Send,
+) -> Result<(), E>
 where
-    F: std::future::Future,
+    T: Sync,
+    E: Send,
 {
-    let timeout = async {
-        smol::Timer::after(duration).await;
-        None
+    if tasks.is_empty() {
+        return Ok(());
+    }
+    let limit = if parallel_amount == 0 {
+        tasks.len()
+    } else {
+        parallel_amount
     };
-    smol::future::or(async { Some(future.await) }, timeout).await
+    for chunk in tasks.chunks(limit) {
+        download_pool().install(|| chunk.par_iter().try_for_each(&f))?;
+    }
+    Ok(())
 }
 
 /// 游戏的下载来源，支持和 BMCLAPI 同格式的自定义镜像源
@@ -52,14 +85,15 @@ where
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum DownloadSource {
     /// 全部使用原始来源下载
+    ///
+    /// 兼容旧配置：已失效的 MCBBS 下载源在反序列化时回退到默认源。
     #[default]
+    #[serde(alias = "MCBBS")]
     Default,
     /// 全部使用 BMCLAPI 提供的镜像源下载
     ///
     /// 为了支持镜像源，在这里鼓励大家前去支持一下：<https://afdian.net/a/bangbang93>
     BMCLAPI,
-    /// 全部使用 MCBBS 提供的镜像源下载
-    MCBBS,
     /// 使用符合 BMCLAPI 镜像链接格式的自定义镜像源下载
     Custom(url::Url),
 }
@@ -72,7 +106,6 @@ impl Display for DownloadSource {
             match self {
                 DownloadSource::Default => "默认（官方）下载源",
                 DownloadSource::BMCLAPI => "BMCLAPI 下载源",
-                DownloadSource::MCBBS => "MCBBS 下载源",
                 DownloadSource::Custom(_) => "自定义",
             }
         )
@@ -86,7 +119,8 @@ impl FromStr for DownloadSource {
         match s {
             "Offical" => Ok(Self::Default),
             "BMCLAPI" => Ok(Self::BMCLAPI),
-            "MCBBS" => Ok(Self::MCBBS),
+            // 已失效的 MCBBS 下载源：旧配置回退到默认源。
+            "MCBBS" => Ok(Self::Default),
             s => {
                 let url = s.parse::<url::Url>();
                 if let Ok(url) = url {
@@ -126,13 +160,13 @@ pub struct Downloader<R> {
     pub java_path: String,
     /// 下载并发量
     parallel_amount: usize,
-    /// 下载并发锁
-    pub(crate) parallel_lock: inner_future::lock::Semaphore,
+    /// 本次下载/修复过程中实际写入或复制成功的文件数
+    ///
+    /// 用于让「补全/修复版本文件」报告真实动作数，而不是处理成功的版本数。
+    repaired_files: Arc<AtomicUsize>,
     /// 下载的进度报告对象
     pub reporter: Option<R>,
 }
-
-// let l = self.parallel_amount.acquire().await;
 
 impl<R> Downloader<R> {
     /// 设置安装的目录，传入一个 `.minecraft` 文件夹路径作为参数
@@ -173,13 +207,9 @@ impl<R: Reporter> Clone for Downloader<R> {
             game_independent: self.game_independent,
             verify_data: self.verify_data,
             java_path: self.java_path.clone(),
-            parallel_lock: if self.parallel_amount == 0 {
-                inner_future::lock::Semaphore::new(usize::MAX)
-            } else {
-                inner_future::lock::Semaphore::new(self.parallel_amount)
-            },
             reporter: self.reporter.clone(),
             parallel_amount: self.parallel_amount,
+            repaired_files: self.repaired_files.clone(),
         }
     }
 }
@@ -217,11 +247,6 @@ impl<R: Reporter> Downloader<R> {
     #[must_use]
     pub fn with_parallel_amount(mut self, limit: usize) -> Self {
         self.parallel_amount = limit;
-        if limit == 0 {
-            self.parallel_lock = inner_future::lock::Semaphore::new(usize::MAX);
-        } else {
-            self.parallel_lock = inner_future::lock::Semaphore::new(limit);
-        }
         self
     }
     /// 是否强制校验已下载的文件以确认是否需要重新下载
@@ -232,15 +257,25 @@ impl<R: Reporter> Downloader<R> {
         self.verify_data = true;
         self
     }
+
+    /// 记录一个实际写入或复制的文件
+    pub(crate) fn mark_file_repaired(&self) {
+        self.repaired_files.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 本次下载器实际写入或复制的文件数
+    pub fn repaired_file_count(&self) -> usize {
+        self.repaired_files.load(Ordering::Relaxed)
+    }
 }
 impl<R: Reporter> Default for Downloader<R> {
     fn default() -> Self {
         Self {
             source: DownloadSource::Default,
-            minecraft_path: MINECRAFT_PATH.to_owned(),
-            minecraft_library_path: MINECRAFT_LIBRARIES_PATH.to_owned(),
-            minecraft_version_path: MINECRAFT_VERSIONS_PATH.to_owned(),
-            minecraft_assets_path: MINECRAFT_ASSETS_PATH.to_owned(),
+            minecraft_path: minecraft_path().to_owned(),
+            minecraft_library_path: minecraft_libraries_path(),
+            minecraft_version_path: minecraft_versions_path(),
+            minecraft_assets_path: minecraft_assets_path(),
             game_independent: false,
             verify_data: false,
             java_path: {
@@ -255,7 +290,7 @@ impl<R: Reporter> Default for Downloader<R> {
             },
             reporter: None,
             parallel_amount: 64,
-            parallel_lock: inner_future::lock::Semaphore::new(64),
+            repaired_files: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -266,7 +301,7 @@ pub trait GameDownload:
 {
     /// 根据参数安装一个游戏，允许安装模组加载器
     #[allow(clippy::too_many_arguments)]
-    async fn download_game(
+    fn download_game(
         &self,
         version_name: &str,
         vanilla: VersionInfo,
@@ -279,7 +314,7 @@ pub trait GameDownload:
 }
 
 impl<R: Reporter> GameDownload for Downloader<R> {
-    async fn download_game(
+    fn download_game(
         &self,
         version_name: &str,
         vanilla: VersionInfo,
@@ -296,48 +331,53 @@ impl<R: Reporter> GameDownload for Downloader<R> {
             std::path::Path::new(&self.minecraft_path).join("launcher_profiles.json");
 
         if !launcher_profiles_path.exists() {
-            inner_future::fs::create_dir_all(launcher_profiles_path.parent().unwrap()).await?;
-            inner_future::fs::write(launcher_profiles_path, r#"{"profiles":{},"selectedProfile":null,"authenticationDatabase":{},"selectedUser":{"account":"00000111112222233333444445555566","profile":"66666555554444433333222221111100"}}"#).await?;
+            fs_err::create_dir_all(launcher_profiles_path.parent().unwrap())?;
+            fs_err::write(
+                launcher_profiles_path,
+                r#"{"profiles":{},"selectedProfile":null,"authenticationDatabase":{},"selectedUser":{"account":"00000111112222233333444445555566","profile":"66666555554444433333222221111100"}}"#,
+            )?;
         }
 
         if !fabric.is_empty() {
-            crate::prelude::inner_future::future::try_zip(
-                self.install_vanilla(version_name, &vanilla),
-                self.download_fabric_pre(version_name, &vanilla.id, fabric),
-            )
-            .await?;
-            self.download_fabric_post(version_name).await?;
+            let (vanilla_result, fabric_result) = rayon::join(
+                || self.install_vanilla(version_name, &vanilla),
+                || self.download_fabric_pre(version_name, &vanilla.id, fabric),
+            );
+            vanilla_result?;
+            fabric_result?;
+            self.download_fabric_post(version_name)?;
         } else if !quiltmc.is_empty() {
-            crate::prelude::inner_future::future::try_zip(
-                self.install_vanilla(version_name, &vanilla),
-                self.download_quiltmc_pre(version_name, &vanilla.id, quiltmc),
-            )
-            .await?;
-            self.download_quiltmc_post(version_name).await?;
+            let (vanilla_result, quiltmc_result) = rayon::join(
+                || self.install_vanilla(version_name, &vanilla),
+                || self.download_quiltmc_pre(version_name, &vanilla.id, quiltmc),
+            );
+            vanilla_result?;
+            quiltmc_result?;
+            self.download_quiltmc_post(version_name)?;
         } else if !forge.is_empty() {
-            self.install_vanilla(&vanilla.id, &vanilla).await?; // Forge 安装需要原版，如果安装器没有解析到则会从官方源下载，速度很慢
-            crate::prelude::inner_future::future::try_zip(
-                self.install_vanilla(version_name, &vanilla),
-                self.install_forge_pre(version_name, &vanilla.id, forge),
-            )
-            .await?;
-            self.install_forge_post(version_name, &vanilla.id, forge)
-                .await?;
+            self.install_vanilla(&vanilla.id, &vanilla)?; // Forge 安装需要原版，如果安装器没有解析到则会从官方源下载，速度很慢
+            let (vanilla_result, forge_result) = rayon::join(
+                || self.install_vanilla(version_name, &vanilla),
+                || self.install_forge_pre(version_name, &vanilla.id, forge),
+            );
+            vanilla_result?;
+            forge_result?;
+            self.install_forge_post(version_name, &vanilla.id, forge)?;
         } else if !neoforge.is_empty() {
-            self.install_vanilla(&vanilla.id, &vanilla).await?; // NeoForge 安装需要原版，如果安装器没有解析到则会从官方源下载，速度很慢
-            crate::prelude::inner_future::future::try_zip(
-                self.install_vanilla(version_name, &vanilla),
-                self.install_neoforge_pre(version_name, &vanilla.id, neoforge),
-            )
-            .await?;
-            self.install_neoforge_post(version_name, &vanilla.id, neoforge)
-                .await?;
+            self.install_vanilla(&vanilla.id, &vanilla)?; // NeoForge 安装需要原版，如果安装器没有解析到则会从官方源下载，速度很慢
+            let (vanilla_result, neoforge_result) = rayon::join(
+                || self.install_vanilla(version_name, &vanilla),
+                || self.install_neoforge_pre(version_name, &vanilla.id, neoforge),
+            );
+            vanilla_result?;
+            neoforge_result?;
+            self.install_neoforge_post(version_name, &vanilla.id, neoforge)?;
         } else {
-            self.install_vanilla(version_name, &vanilla).await?;
+            self.install_vanilla(version_name, &vanilla)?;
         }
         if !optifine.is_empty() {
             if forge.is_empty() && fabric.is_empty() {
-                self.install_vanilla(&vanilla.id, &vanilla).await?; // Optifine 安装需要原版，如果安装器没有解析到则会从官方源下载，速度很慢
+                self.install_vanilla(&vanilla.id, &vanilla)?; // Optifine 安装需要原版，如果安装器没有解析到则会从官方源下载，速度很慢
             }
             let (optifine_type, optifine_patch) =
                 optifine.split_at(optifine.find(' ').context("Optifine 版本字符串不合法！")?);
@@ -347,8 +387,7 @@ impl<R: Reporter> GameDownload for Downloader<R> {
                 optifine_type,
                 &optifine_patch[1..],
                 !forge.is_empty() || !fabric.is_empty(),
-            )
-            .await?;
+            )?;
         }
 
         // 这俩都需要安装器，而安装后会生成一个新的版本元数据
@@ -362,49 +401,15 @@ impl<R: Reporter> GameDownload for Downloader<R> {
 
             if version_info
                 .load()
-                .await
                 .context("无法读取安装完成后的版本元数据！")
                 .is_ok()
             {
                 if let Some(meta) = &mut version_info.meta {
                     meta.fix_libraries();
-                    self.download_libraries(&meta.libraries).await?;
+                    self.download_libraries(&meta.libraries)?;
                 }
             }
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod timeout_tests {
-    use std::time::{Duration, Instant};
-
-    use super::timeout_after;
-
-    /// 永远不完成的网络操作必须在超时后返回 `None`，否则下载/修复任务
-    /// 会永久停在不可达镜像源的 TCP 连接上（A 缺陷的根因）。
-    #[test]
-    fn timeout_after_bounds_pending_future() {
-        let start = Instant::now();
-        let result = smol::block_on(timeout_after(
-            Duration::from_millis(50),
-            std::future::pending::<()>(),
-        ));
-        assert!(result.is_none(), "未完成的 future 应被超时取消");
-        assert!(
-            start.elapsed() >= Duration::from_millis(40),
-            "应至少等待到超时时刻"
-        );
-    }
-
-    /// 正常完成的 future 原样返回结果，不受超时影响。
-    #[test]
-    fn timeout_after_returns_completed_value() {
-        let result = smol::block_on(timeout_after(
-            Duration::from_millis(500),
-            async { 42 },
-        ));
-        assert_eq!(result, Some(42));
     }
 }

@@ -2,11 +2,10 @@
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Mutex,
+    Mutex, OnceLock,
 };
 
 use druid::{ExtEventSink, Target};
-use once_cell::sync::Lazy;
 use scl_core::progress::{ReportState, Reporter};
 use scl_gui_widgets::widgets::{
     ADD_MAX_PROGRESS, ADD_PROGRESS, HIDE_PROGRESS, NEW_PROGRESS, REMOVE_PROGRESS, SET_MAX_PROGRESS,
@@ -72,8 +71,11 @@ impl InnerProgress {
 
 /// 当前注册到系统任务栏的进度记录表
 #[cfg(unix)]
-static PROG_INDEX: Lazy<Mutex<std::collections::HashMap<usize, InnerProgress>>> =
-    Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
+fn progress_index() -> &'static Mutex<std::collections::HashMap<usize, InnerProgress>> {
+    static PROG_INDEX: OnceLock<Mutex<std::collections::HashMap<usize, InnerProgress>>> =
+        OnceLock::new();
+    PROG_INDEX.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
 
 /// 依据进度命令更新任务栏进度表，并把聚合结果写入系统任务栏。
 ///
@@ -82,7 +84,7 @@ static PROG_INDEX: Lazy<Mutex<std::collections::HashMap<usize, InnerProgress>>> 
 pub fn update_taskbar_progress(cmd: &druid::Command, window: &druid::WindowHandle) -> bool {
     let mut changed = false;
     if let Some(id) = cmd.get(NEW_PROGRESS) {
-        if let Ok(mut map) = PROG_INDEX.lock() {
+        if let Ok(mut map) = progress_index().lock() {
             map.entry(*id).or_insert_with(InnerProgress::new);
         }
         changed = true;
@@ -105,7 +107,7 @@ pub fn update_taskbar_progress(cmd: &druid::Command, window: &druid::WindowHandl
         with_progress(id, |p| p.set_sub_message(message.clone()));
         changed = true;
     } else if let Some(id) = cmd.get(REMOVE_PROGRESS).or_else(|| cmd.get(HIDE_PROGRESS)) {
-        if let Ok(mut map) = PROG_INDEX.lock() {
+        if let Ok(mut map) = progress_index().lock() {
             map.remove(id);
         }
         changed = true;
@@ -118,7 +120,7 @@ pub fn update_taskbar_progress(cmd: &druid::Command, window: &druid::WindowHandl
 
 #[cfg(unix)]
 fn with_progress(id: &usize, f: impl FnOnce(&mut InnerProgress)) {
-    if let Ok(mut map) = PROG_INDEX.lock() {
+    if let Ok(mut map) = progress_index().lock() {
         if let Some(progress) = map.get_mut(id) {
             f(progress);
         }
@@ -133,7 +135,7 @@ fn sync_taskbar(window: &druid::WindowHandle) {
         use druid::HasRawWindowHandle;
         use taskbar_interface::{ProgressIndicatorState, TaskbarInterface};
 
-        let Ok(mut map) = PROG_INDEX.lock() else {
+        let Ok(mut map) = progress_index().lock() else {
             return;
         };
         let raw = window.raw_window_handle();

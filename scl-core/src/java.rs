@@ -1,8 +1,6 @@
 //! Java 的搜索，版本检测
 use std::path::{Path, PathBuf};
 
-use inner_future::stream::StreamExt;
-
 use crate::{
     prelude::*,
     utils::{locate_path, Arch},
@@ -22,18 +20,18 @@ impl JavaRuntime {
     /// 通过一个指向 Java 可执行文件的路径来创建 [`JavaRuntime`]
     ///
     /// 在此会尝试运行这个文件并获取相关的版本信息，确认无误后返回
-    pub async fn from_java_path(java_path: impl AsRef<std::ffi::OsStr>) -> DynResult<Self> {
+    pub fn from_java_path(java_path: impl AsRef<std::ffi::OsStr>) -> DynResult<Self> {
         tracing::debug!(
             "正在重新定位 Java 执行文件: {}",
             java_path.as_ref().to_string_lossy()
         );
         let java_path = locate_path(java_path.as_ref());
         tracing::debug!("Java 执行文件已重新定位: {}", java_path.display());
-        let output = query_java_version_output(&java_path).await?;
+        let output = query_java_version_output(&java_path)?;
         let version = query_java_version(&output);
         let java_main_version = get_java_version(version);
         let java_64bit = query_java_is_64bit(&output);
-        let java_arch = crate::utils::get_exec_arch(&java_path).await?;
+        let java_arch = crate::utils::get_exec_arch(&java_path)?;
         Ok(Self {
             java_path: java_path.to_string_lossy().to_string(),
             java_64bit,
@@ -75,12 +73,12 @@ impl JavaRuntime {
 }
 
 /// 执行 Java 并使用 -version 获取其版本输出
-async fn query_java_version_output(java_path: impl AsRef<std::ffi::OsStr>) -> DynResult<String> {
+fn query_java_version_output(java_path: impl AsRef<std::ffi::OsStr>) -> DynResult<String> {
     let c = {
         #[cfg(windows)]
         {
-            use inner_future::process::windows::CommandExt;
-            inner_future::process::Command::new(java_path)
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new(java_path)
                 .arg("-version")
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -89,14 +87,14 @@ async fn query_java_version_output(java_path: impl AsRef<std::ffi::OsStr>) -> Dy
         }
         #[cfg(not(windows))]
         {
-            inner_future::process::Command::new(java_path)
+            std::process::Command::new(java_path)
                 .arg("-version")
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()?
         }
     };
-    let output = c.output().await?;
+    let output = c.wait_with_output()?;
     Ok(String::from_utf8(output.stderr)?)
 }
 
@@ -136,11 +134,11 @@ fn get_java_version(java_version_string: &str) -> u8 {
 
 /// 搜索可能存在 Java 的地方找到可用的 Java 运行时
 /// 返回的结果列表项均为 java.exe/javaw.exe 或 java 执行文件的目录
-pub async fn search_for_java() -> Vec<String> {
+pub fn search_for_java() -> Vec<String> {
     // 从安装目录中搜索 Java
-    async fn check_bin_java_directory(path: impl AsRef<Path>, result: &mut Vec<String>) {
-        if let Ok(mut d) = inner_future::fs::read_dir(path).await {
-            while let Ok(Some(d)) = d.try_next().await {
+    fn check_bin_java_directory(path: impl AsRef<Path>, result: &mut Vec<String>) {
+        if let Ok(d) = fs_err::read_dir(path.as_ref()) {
+            for d in d.flatten() {
                 let mut path = d.path();
                 #[cfg(target_os = "macos")]
                 path.push("Contents/Home");
@@ -219,39 +217,39 @@ pub async fn search_for_java() -> Vec<String> {
         search_local_machine_reg_value("Java Development Kit", &mut result);
         search_local_machine_reg_value("JRE", &mut result);
         search_local_machine_reg_value("JDK", &mut result);
-        async fn list_java_directory(path: &str, result: &mut Vec<String>) {
+        fn list_java_directory(path: &str, result: &mut Vec<String>) {
             let mut path = std::path::PathBuf::from(path);
             path.push("Java");
-            check_bin_java_directory(&path, result).await;
+            check_bin_java_directory(&path, result);
             path.pop();
             path.push("BellSoft");
-            check_bin_java_directory(&path, result).await;
+            check_bin_java_directory(&path, result);
             path.pop();
             path.push("AdoptOpenJDK");
-            check_bin_java_directory(&path, result).await;
+            check_bin_java_directory(&path, result);
             path.pop();
             path.push("Zulu");
-            check_bin_java_directory(&path, result).await;
+            check_bin_java_directory(&path, result);
             path.pop();
             path.push("Microsoft");
-            check_bin_java_directory(&path, result).await;
+            check_bin_java_directory(&path, result);
             path.pop();
             path.push("Eclipse Foundation");
-            check_bin_java_directory(&path, result).await;
+            check_bin_java_directory(&path, result);
             path.pop();
             path.push("Semeru");
-            check_bin_java_directory(&path, result).await;
+            check_bin_java_directory(&path, result);
             path.pop();
         }
         if let Ok(program_files) = std::env::var("ProgramFiles")
             .or_else::<std::env::VarError, _>(|_| Ok("C:\\Program Files".into()))
         {
-            list_java_directory(&program_files, &mut result).await;
+            list_java_directory(&program_files, &mut result);
         }
         if let Ok(program_files) = std::env::var("ProgramFiles(x86)")
             .or_else::<std::env::VarError, _>(|_| Ok("C:\\Program Files (x86)".into()))
         {
-            list_java_directory(&program_files, &mut result).await;
+            list_java_directory(&program_files, &mut result);
             let mut minecraft_launcher_dir = PathBuf::from(program_files);
             minecraft_launcher_dir
                 .push("Minecraft Launcher\\runtime\\jre-legacy\\windows-x64\\jre-legacy\\bin");
@@ -276,7 +274,7 @@ pub async fn search_for_java() -> Vec<String> {
         if let Ok(program_files) = std::env::var("ProgramFiles(ARM)")
             .or_else::<std::env::VarError, _>(|_| Ok("C:\\Program Files (ARM)".into()))
         {
-            list_java_directory(&program_files, &mut result).await;
+            list_java_directory(&program_files, &mut result);
         }
         // 从环境变量中查询 java.exe
         if let Ok(paths) = std::env::var("PATH") {
@@ -287,7 +285,7 @@ pub async fn search_for_java() -> Vec<String> {
         // 从 JABBA 中查询 java.exe
         if let Ok(path) = std::env::var("JABBA_HOME") {
             let path = PathBuf::from(path).join("jdk");
-            check_bin_java_directory(path.as_path(), &mut result).await;
+            check_bin_java_directory(path.as_path(), &mut result);
         }
         let mut result: Vec<_> = result
             .into_iter()
@@ -326,9 +324,9 @@ pub async fn search_for_java() -> Vec<String> {
         let mut result = Vec::with_capacity(16);
 
         // 一些常见目录
-        check_bin_java_directory("/usr/java/bin", &mut result).await;
-        check_bin_java_directory("/usr/lib/jvm/bin", &mut result).await;
-        check_bin_java_directory("/usr/lib32/jvm/bin", &mut result).await;
+        check_bin_java_directory("/usr/java/bin", &mut result);
+        check_bin_java_directory("/usr/lib/jvm/bin", &mut result);
+        check_bin_java_directory("/usr/lib32/jvm/bin", &mut result);
 
         // 从环境变量中查询 java.exe
         if let Ok(paths) = std::env::var("PATH") {
@@ -339,7 +337,7 @@ pub async fn search_for_java() -> Vec<String> {
         // 从 JABBA 中查询 java.exe
         if let Ok(path) = std::env::var("JABBA_HOME") {
             let path = PathBuf::from(path).join("jdk");
-            check_bin_java_directory(path.as_path(), &mut result).await;
+            check_bin_java_directory(path.as_path(), &mut result);
         }
         // 主目录里的 .minecraft/runtime 文件夹
         if let Some(mut home_path) = dirs::home_dir() {
@@ -355,8 +353,8 @@ pub async fn search_for_java() -> Vec<String> {
     {
         let mut result = Vec::with_capacity(16);
 
-        check_bin_java_directory("/Library/Java/JavaVirtualMachines", &mut result).await;
-        check_bin_java_directory("/System/Library/Java/JavaVirtualMachines", &mut result).await;
+        check_bin_java_directory("/Library/Java/JavaVirtualMachines", &mut result);
+        check_bin_java_directory("/System/Library/Java/JavaVirtualMachines", &mut result);
         check_java(
             "/Library/Internet Plug-Ins/JavaAppletPlugin.plugin/Contents/Home/bin/java",
             &mut result,

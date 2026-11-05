@@ -10,7 +10,7 @@
 
    ## 功能/特点
 
-   - 全异步操作，使用 smol 作为异步框架，快速且轻量
+   - 同步阻塞 I/O，使用 rayon 线程池并发下载，ureq 作为 HTTP 客户端
    - 全版本启动支持
    - 下载纯净游戏
    - 下载 Forge 模组安装器
@@ -18,7 +18,7 @@
    - 下载 Optifine 模组
    - 自定义启动参数
    - 正版登录（Mojang, Microsoft（你需要自行获取到回调链接））
-   - 多下载源（BMCLAPI MCBBS MC）
+   - 多下载源（BMCLAPI 与自定义镜像）
    - Curseforge 模组检索/下载
 
    ## 部分引用的 JAR 的原仓库
@@ -30,7 +30,6 @@
 */
 
 #![forbid(missing_docs)]
-#![allow(async_fn_in_trait)]
 
 pub mod auth;
 pub mod client;

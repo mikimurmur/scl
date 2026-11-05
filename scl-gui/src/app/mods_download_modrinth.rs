@@ -32,8 +32,8 @@ fn spawn_cname_requests(sink: &ExtEventSink, mods: &[ModState]) {
     for item in mods {
         let key = item.slug.clone();
         let sink = sink.clone();
-        thread_main(async move {
-            let cname = scl_core::download::mcmod::get_mod_cname(&key).await;
+        thread_main(move || {
+            let cname = scl_core::download::mcmod::get_mod_cname(&key);
             if !cname.is_empty() {
                 let _ = sink.submit_command(
                     APP_EVENT,
@@ -54,15 +54,14 @@ fn start_search(ctx: &EventCtx, data: &AppState, page: u64) {
     let sink = ctx.get_external_handle();
     let filter = data.mods_download_modrinth_search_filter.trim().to_owned();
     let generation = data.mods_download_modrinth_search_generation;
-    thread_main(async move {
-        // 搜索失败时弹出「执行异步任务发生错误」窗，不向界面提交命令；
-        // 成功才把结果送回界面，图标与中文名再逐个异步补上。
+    thread_main(move || {
+        // 搜索失败时弹出「执行后台任务发生错误」窗，不向界面提交命令；
+        // 成功才把结果送回界面，图标与中文名再逐个后台补上。
         let items = modrinth::search_mods(SearchParams {
             search_filter: filter,
             index: page.max(1),
             page_size: 20,
-        })
-        .await?;
+        })?;
         let mods = items.into_iter().map(to_state).collect::<Vec<_>>();
         let icons = mods
             .iter()
@@ -81,8 +80,8 @@ fn start_search(ctx: &EventCtx, data: &AppState, page: u64) {
         for (id, _) in icons {
             let sink = sink.clone();
             let id_for_task = id.to_owned();
-            thread_main(async move {
-                if let Ok(image) = modrinth::get_mod_icon(&id_for_task).await {
+            thread_main(move || {
+                if let Ok(image) = modrinth::get_mod_icon(&id_for_task) {
                     if let Ok(icon) = crate::utils::image::from_image_to_string(&image) {
                         let _ = sink.submit_command(
                             APP_EVENT,
@@ -106,8 +105,9 @@ fn start_search(ctx: &EventCtx, data: &AppState, page: u64) {
 pub fn apply_search(ctx: &mut EventCtx, data: &mut AppState) {
     data.mods_download_modrinth_page = 1;
     data.mods_download_modrinth_searching = true;
-    data.mods_download_modrinth_search_generation =
-        data.mods_download_modrinth_search_generation.wrapping_add(1);
+    data.mods_download_modrinth_search_generation = data
+        .mods_download_modrinth_search_generation
+        .wrapping_add(1);
     start_search(ctx, data, 1);
 }
 
@@ -118,8 +118,9 @@ pub fn load_more(ctx: &mut EventCtx, data: &mut AppState) {
     }
     data.mods_download_modrinth_page = data.mods_download_modrinth_page.saturating_add(1).max(1);
     data.mods_download_modrinth_searching = true;
-    data.mods_download_modrinth_search_generation =
-        data.mods_download_modrinth_search_generation.wrapping_add(1);
+    data.mods_download_modrinth_search_generation = data
+        .mods_download_modrinth_search_generation
+        .wrapping_add(1);
     start_search(ctx, data, data.mods_download_modrinth_page);
 }
 
@@ -151,10 +152,10 @@ pub fn select_mod(ctx: &mut EventCtx, data: &mut AppState, mod_state: &ModState)
     );
     let sink = ctx.get_external_handle();
     let id = mod_state.id.clone();
-    thread_main(async move {
-        // 文件请求/解析失败时弹出「执行异步任务发生错误」窗，
+    thread_main(move || {
+        // 文件请求/解析失败时弹出「执行后台任务发生错误」窗，
         // 文件列表停留空白。
-        let versions = modrinth::get_mod_files(&id).await?;
+        let versions = modrinth::get_mod_files(&id)?;
         let mut files = Vec::new();
         for version in versions {
             for file in version.files {

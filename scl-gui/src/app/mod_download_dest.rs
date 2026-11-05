@@ -12,7 +12,7 @@ use crate::{
 };
 
 /// 根据版本名称获取模组安装目录
-async fn mods_folder(
+fn mods_folder(
     method: crate::config::VersionIndependentMethod,
     minecraft_folder: PathBuf,
     version_name: &str,
@@ -25,7 +25,7 @@ async fn mods_folder(
         version: version_name.to_owned(),
         ..Default::default()
     };
-    let independent = if info.load().await.is_ok() {
+    let independent = if info.load().is_ok() {
         match info.scl_launch_config.as_ref() {
             Some(scl) => scl.game_independent,
             None => prelude::should_version_independent(
@@ -85,32 +85,29 @@ fn selected_file(data: &AppState) -> Option<ModFileState> {
 fn download_to(ctx: &EventCtx, data: &mut AppState, file: ModFileState, dest: PathBuf) {
     let sink = ctx.get_external_handle();
     data.starting_tip = Some(format!("正在下载模组 {}", file.file_name));
-    thread_main(
-        async move { download_file(&sink, &file.file_name, &file.download_url, dest).await },
-    );
+    thread_main(move || download_file(&sink, &file.file_name, &file.download_url, dest));
 }
 
 /// 下载一个模组文件到指定目录，完成后通过 [`APP_EVENT`] 通知界面。
 ///
-/// 失败时错误向上抛给 [`thread_main`]，由异步错误弹窗展示
-/// （官方 install 任务经 do_async_ok_inner，Err 同样走“执行异步任务发生错误”弹窗，
+/// 失败时错误向上抛给 [`thread_main`]，由后台错误弹窗展示
+/// （官方 install 任务经后台任务错误回调，Err 同样走“执行后台任务发生错误”弹窗，
 /// 且页面在点击版本行时已经 QUERY_POP_PAGE 弹回，不等待下载完成）。
-async fn download_file(
+fn download_file(
     sink: &ExtEventSink,
     file_name: &str,
     download_url: &str,
     dest: PathBuf,
 ) -> anyhow::Result<()> {
     if let Some(parent) = dest.parent() {
-        smol::fs::create_dir_all(parent).await?;
+        fs_err::create_dir_all(parent)?;
     }
     scl_core::download::curseforge::download_mod(
         Some(Progress::new(sink.clone())),
         file_name,
         download_url,
         dest,
-    )
-    .await?;
+    )?;
     let _ = sink.submit_command(
         APP_EVENT,
         AppEvent::ModDownloaded(Ok(String::new())),
@@ -130,15 +127,14 @@ pub fn install(ctx: &EventCtx, data: &mut AppState, version: &str) {
     let minecraft_folder = data.minecraft_folder();
     let version_name = version.to_owned();
     data.starting_tip = Some(format!("安装模组 {} 到 {}", file.file_name, version_name));
-    thread_main(async move {
-        let folder = mods_folder(method, minecraft_folder, &version_name).await;
+    thread_main(move || {
+        let folder = mods_folder(method, minecraft_folder, &version_name);
         download_file(
             &sink,
             &file.file_name,
             &file.download_url,
             folder.join(&file.file_name),
         )
-        .await
     });
 }
 

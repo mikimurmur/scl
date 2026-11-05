@@ -36,7 +36,7 @@ pub fn cache_entry_matches(
     entry_version == version_name && entry_epoch == current_epoch
 }
 
-/// 纯函数：判断迟到的异步回调是否仍属于当前打开的版本设置页。
+/// 纯函数：判断迟到的后台回调是否仍属于当前打开的版本设置页。
 ///
 /// 退出页面或切换到另一个版本时 token 会递增，事件里的版本名与 token
 /// 任一不匹配即丢弃，避免把 A 版本的模组/计数写进 B 版本。
@@ -59,7 +59,7 @@ fn mod_icon_path(meta: &scl_core::version::mods::ModMeta) -> Option<String> {
 /// 直接读取并解码 jar 内图标，避免再次解析一遍元数据。
 fn read_mod_icon(path: &std::path::Path, icon: &str) -> Option<image::DynamicImage> {
     use std::io::Read;
-    let file = std::fs::File::open(path).ok()?;
+    let file = fs_err::File::open(path).ok()?;
     let mut zip = zip::ZipArchive::new(file).ok()?;
     let mut entry = zip.by_name(icon.trim_start_matches(['/', '\\'])).ok()?;
     let mut buf = Vec::with_capacity(entry.size() as usize);
@@ -72,25 +72,22 @@ fn read_mod_icon(path: &std::path::Path, icon: &str) -> Option<image::DynamicIma
 /// 官方把「读取失败」与「读取成功但为 0」区分开：前者显示「无」，
 /// 后者显示「已游玩 0」（实测空 saves 目录 vs 无 saves 目录）。
 fn count_dir_entries(path: &std::path::Path) -> Option<usize> {
-    std::fs::read_dir(path)
+    fs_err::read_dir(path)
         .ok()
         .map(|dir| dir.filter_map(|entry| entry.ok()).count())
 }
 
 /// 读取模组列表（含图标解码），与三条目录计数相互独立。
-async fn read_mods(info: &CoreVersionInfo) -> anyhow::Result<Vec<LocalMod>> {
-    read_mods_with(info, true).await
+fn read_mods(info: &CoreVersionInfo) -> anyhow::Result<Vec<LocalMod>> {
+    read_mods_with(info, true)
 }
 
 /// `with_icons=false` 时跳过图标解码：版本设置页只显示三行描述，
 /// 模组列表的图标在进入模组管理页时再加载（官方模组行 586ms、图标不阻塞描述）。
 ///
 /// 返回 `Err` 表示 mods 目录读取失败（官方此时显示「无」而不是「已安装 0」）。
-async fn read_mods_with(
-    info: &CoreVersionInfo,
-    with_icons: bool,
-) -> anyhow::Result<Vec<LocalMod>> {
-    let mods = info.get_mods().await?;
+fn read_mods_with(info: &CoreVersionInfo, with_icons: bool) -> anyhow::Result<Vec<LocalMod>> {
+    let mods = info.get_mods()?;
     let total = mods.len();
     if total == 0 {
         return Ok(Vec::new());
@@ -99,8 +96,9 @@ async fn read_mods_with(
     // 这里用固定 8 个原生线程分块并行，最后按下标还原 `read_dir` 原始顺序。
     let workers = total.min(32);
     let mut indexed: Vec<(usize, LocalMod)> = Vec::with_capacity(total);
-    let slots: Vec<std::sync::Mutex<Vec<(usize, LocalMod)>>> =
-        (0..workers).map(|_| std::sync::Mutex::new(Vec::new())).collect();
+    let slots: Vec<std::sync::Mutex<Vec<(usize, LocalMod)>>> = (0..workers)
+        .map(|_| std::sync::Mutex::new(Vec::new()))
+        .collect();
     std::thread::scope(|scope| {
         for (worker, slot) in slots.iter().enumerate() {
             let chunk: Vec<(usize, Mod)> = mods
@@ -112,30 +110,32 @@ async fn read_mods_with(
             scope.spawn(move || {
                 let mut out = Vec::with_capacity(chunk.len());
                 for (index, item) in chunk {
-                    let built = smol::block_on(async move {
-                        let meta = item.try_get_mod_meta().await.ok();
-                        // 只解析一次元数据，名称/版本/图标路径都从同一份结果取；
-                        // 解析失败时官方直接显示原始文件名（含 `.jar` /
-                        // `.jar.disabled`），不做去后缀处理（真实 103 模组对照）。
-                        let name = meta
-                            .as_ref()
-                            .map(|m| m.name().to_owned())
-                            .unwrap_or_else(|| item.file_name().to_owned());
-                        let version = meta
-                            .as_ref()
-                            .map(|m| m.version().to_owned())
-                            .unwrap_or_default();
-                        let icon = if with_icons {
-                            meta.as_ref()
-                                .and_then(mod_icon_path)
-                                .and_then(|icon_path| {
-                                    read_mod_icon(item.path(), &icon_path)
-                                        .and_then(|image| crate::utils::thread::image_buf_from_dynamic(image).ok())
+                    let meta = item.try_get_mod_meta().ok();
+                    // 只解析一次元数据，名称/版本/图标路径都从同一份结果取；
+                    // 解析失败时官方直接显示原始文件名（含 `.jar` /
+                    // `.jar.disabled`），不做去后缀处理（真实 103 模组对照）。
+                    let name = meta
+                        .as_ref()
+                        .map(|m| m.name().to_owned())
+                        .unwrap_or_else(|| item.file_name().to_owned());
+                    let version = meta
+                        .as_ref()
+                        .map(|m| m.version().to_owned())
+                        .unwrap_or_default();
+                    let icon = if with_icons {
+                        meta.as_ref()
+                            .and_then(mod_icon_path)
+                            .and_then(|icon_path| {
+                                read_mod_icon(item.path(), &icon_path).and_then(|image| {
+                                    crate::utils::thread::image_buf_from_dynamic(image).ok()
                                 })
-                                .unwrap_or_else(druid::ImageBuf::empty)
-                        } else {
-                            druid::ImageBuf::empty()
-                        };
+                            })
+                            .unwrap_or_else(druid::ImageBuf::empty)
+                    } else {
+                        druid::ImageBuf::empty()
+                    };
+                    out.push((
+                        index,
                         LocalMod {
                             name,
                             file_name: item.file_name().to_owned(),
@@ -143,9 +143,8 @@ async fn read_mods_with(
                             enabled: item.is_enabled(),
                             icon,
                             path: item.path().to_string_lossy().to_string(),
-                        }
-                    });
-                    out.push((index, built));
+                        },
+                    ));
                 }
                 *slot.lock().unwrap() = out;
             });
@@ -173,10 +172,7 @@ fn read_counts(game_dir: &std::path::Path) -> (String, String) {
         game_dir.join("texturepacks")
     };
     // 「已安装」行即使为 0（甚至目录不存在）也显示数字。
-    let resource_packs_desc = format!(
-        "已安装 {}",
-        count_dir_entries(&resource_dir).unwrap_or(0)
-    );
+    let resource_packs_desc = format!("已安装 {}", count_dir_entries(&resource_dir).unwrap_or(0));
     (maps_desc, resource_packs_desc)
 }
 
@@ -212,19 +208,17 @@ fn load_mods_task(
     cache_epoch: u64,
     independence_method: crate::config::VersionIndependentMethod,
 ) {
-    tracing::debug!(
-        "版本设置计数加载开始：{version_name} token={token} icons={with_icons}"
-    );
+    tracing::debug!("版本设置计数加载开始：{version_name} token={token} icons={with_icons}");
     let sink = ctx.get_external_handle();
-    thread_main(async move {
+    thread_main(move || {
         let mut info = CoreVersionInfo {
             version_base: version_base.to_string_lossy().to_string(),
             version: version_name.clone(),
             ..Default::default()
         };
-        let (mods, mods_desc) = if info.load().await.is_ok() {
+        let (mods, mods_desc) = if info.load().is_ok() {
             ensure_effective_independence(&mut info, independence_method);
-            match read_mods_with(&info, with_icons).await {
+            match read_mods_with(&info, with_icons) {
                 Ok(mods) => {
                     let desc = format!("已安装 {}", mods.len());
                     (mods, desc)
@@ -255,7 +249,7 @@ fn load_mods_task(
 ///
 /// 与官方点击闭包等价：只做 `VersionInfo::load` 读取版本配置，随即发送
 /// `VersionConfigLoaded`（处理器推入页面）；模组解析与目录计数由
-/// `on_app_push_page` 在页面出现之后异步执行，避免卡住进页。
+/// `on_app_push_page` 在页面出现之后后台执行，避免卡住进页。
 pub fn on_app_event_command(ctx: &mut EventCtx, data: &mut AppState, name: &str) {
     let version_base = data.versions_folder();
     let independence_method = data.config.version_independent_method;
@@ -265,14 +259,14 @@ pub fn on_app_event_command(ctx: &mut EventCtx, data: &mut AppState, name: &str)
         .map(|entry| (entry.maps_desc.clone(), entry.resource_packs_desc.clone()));
     let name = name.to_owned();
     let sink = ctx.get_external_handle();
-    thread_main(async move {
+    thread_main(move || {
         let mut info = CoreVersionInfo {
             version_base: version_base.to_string_lossy().to_string(),
             version: name.to_owned(),
             ..Default::default()
         };
-        let result = async {
-            info.load().await?;
+        let result = (|| {
+            info.load()?;
             let had_config = info.scl_launch_config.is_some();
             let config = info
                 .scl_launch_config
@@ -291,8 +285,7 @@ pub fn on_app_event_command(ctx: &mut EventCtx, data: &mut AppState, name: &str)
                 None => read_counts(&info.version_path()),
             };
             anyhow::Ok((config, version_type, maps_desc, resource_packs_desc))
-        }
-        .await;
+        })();
         match result {
             Ok((config, version_type, maps_desc, resource_packs_desc)) => {
                 let _ = sink.submit_command(
@@ -422,7 +415,7 @@ fn launch_config_to_save(
 /// 把一个版本的设置写回 `<版本目录>/.scl.json`，并按需重命名版本。
 ///
 /// 这是保存链路的纯函数部分，页面弹出保存与高级设置页的「保存设置」共用。
-async fn persist_version_setting(
+fn persist_version_setting(
     version_base: std::path::PathBuf,
     old_name: String,
     new_name: String,
@@ -433,14 +426,14 @@ async fn persist_version_setting(
         version: old_name.to_owned(),
         ..Default::default()
     };
-    info.load().await?;
+    info.load()?;
     let mut name = old_name;
     if !new_name.is_empty() && new_name != name {
-        info.rename_version(&new_name).await?;
+        info.rename_version(&new_name)?;
         name = new_name;
     }
     info.scl_launch_config = launch_config_to_save(&config);
-    info.save().await?;
+    info.save()?;
     Ok(name)
 }
 
@@ -461,9 +454,7 @@ pub fn save_on_close(data: &AppState) {
     match launch_config_to_save(&data.version_setting_config) {
         Some(config) => match serde_json::to_string(&config) {
             Ok(json) => {
-                if let Err(err) =
-                    crate::utils::prelude::write_file_safe_sync(&path, json)
-                {
+                if let Err(err) = crate::utils::prelude::write_file_safe_sync(&path, json) {
                     tracing::error!("关闭前保存版本设置失败：{err:?}");
                 } else {
                     tracing::debug!("关闭前已保存版本设置");
@@ -474,7 +465,7 @@ pub fn save_on_close(data: &AppState) {
         // 与页面弹出的保存语义一致：两项都未启用时删除版本级配置文件。
         None => {
             if path.is_file() {
-                if let Err(err) = std::fs::remove_file(&path) {
+                if let Err(err) = fs_err::remove_file(&path) {
                     tracing::error!("关闭前移除版本设置失败：{err:?}");
                 }
             }
@@ -493,8 +484,8 @@ pub fn save_version(ctx: &mut EventCtx, data: &mut AppState) {
     let config = data.version_setting_config.to_owned();
     let sink = ctx.get_external_handle();
     data.starting_tip = Some("正在保存版本设置……".into());
-    thread_main(async move {
-        match persist_version_setting(version_base, old_name, new_name, config).await {
+    thread_main(move || {
+        match persist_version_setting(version_base, old_name, new_name, config) {
             Ok(name) => {
                 let _ = sink.submit_command(
                     APP_EVENT,
@@ -517,7 +508,7 @@ pub fn save_version(ctx: &mut EventCtx, data: &mut AppState) {
 /// 页面弹出时保存版本设置与重命名结果。
 ///
 /// 官方没有「保存设置」按钮，`app::version_setting::on_app_pop_page` 在页面
-/// 弹出时异步把配置写入 `<版本目录>/.scl.json`，并在名称输入框变化时重命名版本。
+/// 弹出时后台把配置写入 `<版本目录>/.scl.json`，并在名称输入框变化时重命名版本。
 pub fn on_app_pop_page(ctx: &mut EventCtx, data: &mut AppState) {
     // 退出页面即作废所有在途的模组/计数回调。
     data.version_setting_load_token = data.version_setting_load_token.wrapping_add(1);
@@ -530,8 +521,8 @@ pub fn on_app_pop_page(ctx: &mut EventCtx, data: &mut AppState) {
     let version_base = data.versions_folder();
     let config = data.version_setting_config.to_owned();
     let sink = ctx.get_external_handle();
-    thread_main(async move {
-        match persist_version_setting(version_base, old_name, new_name, config).await {
+    thread_main(move || {
+        match persist_version_setting(version_base, old_name, new_name, config) {
             Ok(name) => {
                 let _ = sink.submit_command(
                     APP_EVENT,
@@ -562,13 +553,13 @@ pub fn fix_version(ctx: &mut EventCtx, data: &mut AppState) {
     let source = data.config.download_source.clone();
     let parallel_amount = data.config.download_parallel_amount;
     let sink = ctx.get_external_handle();
-    thread_main(async move {
+    thread_main(move || {
         let progress = Progress::new(sink.clone());
         scl_core::progress::Reporter::send(
             &progress,
             scl_core::progress::ReportState::SetMessage("正在修复版本文件".into()),
         );
-        let result = async {
+        let result = (|| {
             // 不再先 `load()` 版本元数据：JSON 损坏正是需要修复的场景，
             // 预加载会在修复入口直接失败，导致「补全/修复版本文件」对损坏
             // 版本毫无动作。修复本身会从客户端 JAR 里恢复 JSON。
@@ -592,9 +583,7 @@ pub fn fix_version(ctx: &mut EventCtx, data: &mut AppState) {
                 parallel_amount,
                 progress.clone(),
             )
-            .await
-        }
-        .await;
+        })();
         progress.remove();
         let result = result.map_err(|err| format!("{err:?}"));
         let _ = sink.submit_command(
@@ -614,13 +603,13 @@ pub fn remove_version(ctx: &mut EventCtx, data: &mut AppState) {
     }
     let version_base = data.versions_folder();
     let sink = ctx.get_external_handle();
-    thread_main(async move {
+    thread_main(move || {
         let info = CoreVersionInfo {
             version_base: version_base.to_string_lossy().to_string(),
             version: name.to_owned(),
             ..Default::default()
         };
-        info.delete().await;
+        info.delete();
         let _ = sink.submit_command(
             APP_EVENT,
             AppEvent::DownloadFinished(Ok(String::new())),
@@ -647,21 +636,21 @@ pub fn toggle_mod(ctx: &EventCtx, data: &mut AppState, path: &str) {
     let cache_epoch = data.version_setting_cache_epoch;
     let independence_method = data.config.version_independent_method;
     let version_base = data.versions_folder();
-    thread_main(async move {
-        let mut item = Mod::from_path(&path).await?;
+    thread_main(move || {
+        let mut item = Mod::from_path(&path)?;
         if item.is_enabled() {
-            item.disable().await?;
+            item.disable()?;
         } else {
-            item.enable().await?;
+            item.enable()?;
         }
         let mut info = CoreVersionInfo {
             version_base: version_base.to_string_lossy().to_string(),
             version: version_name.clone(),
             ..Default::default()
         };
-        let (mods, mods_desc) = if info.load().await.is_ok() {
+        let (mods, mods_desc) = if info.load().is_ok() {
             ensure_effective_independence(&mut info, independence_method);
-            match read_mods(&info).await {
+            match read_mods(&info) {
                 Ok(mods) => {
                     let desc = format!("已安装 {}", mods.len());
                     (mods, desc)
@@ -700,17 +689,17 @@ pub fn delete_mod(ctx: &EventCtx, data: &mut AppState, path: &str) {
     let cache_epoch = data.version_setting_cache_epoch;
     let independence_method = data.config.version_independent_method;
     let version_base = data.versions_folder();
-    thread_main(async move {
-        let item = Mod::from_path(&path).await?;
-        item.remove().await?;
+    thread_main(move || {
+        let item = Mod::from_path(&path)?;
+        item.remove()?;
         let mut info = CoreVersionInfo {
             version_base: version_base.to_string_lossy().to_string(),
             version: version_name.clone(),
             ..Default::default()
         };
-        let (mods, mods_desc) = if info.load().await.is_ok() {
+        let (mods, mods_desc) = if info.load().is_ok() {
             ensure_effective_independence(&mut info, independence_method);
-            match read_mods(&info).await {
+            match read_mods(&info) {
                 Ok(mods) => {
                     let desc = format!("已安装 {}", mods.len());
                     (mods, desc)
@@ -809,16 +798,16 @@ mod tests {
         // 模拟关窗落盘 → 重开读取：文件内容必须还能反序列化出隔离值。
         let dir =
             std::env::temp_dir().join(format!("scl_version_setting_test_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        fs_err::create_dir_all(&dir).expect("创建临时目录");
         let path = dir.join(".scl.json");
-        std::fs::write(&path, &json).expect("写入 .scl.json");
-        let disk = std::fs::read_to_string(&path).expect("读取 .scl.json");
+        fs_err::write(&path, &json).expect("写入 .scl.json");
+        let disk = fs_err::read_to_string(&path).expect("读取 .scl.json");
         let disk_core: scl_core::version::structs::SCLLaunchConfig =
             serde_json::from_str(&disk).expect("重开时应能反序列化");
         let reopened = SCLLaunchConfig::from_core(disk_core);
         assert!(reopened.enable);
         assert!(reopened.game_independent);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs_err::remove_dir_all(&dir);
 
         // 启动路径直接读取 core 配置，game_independent 决定游戏目录。
         let info = CoreVersionInfo {
@@ -839,11 +828,11 @@ mod tests {
         // 再重新 load 该版本，确认 game_independent 仍在、没有写 enable 字段。
         let dir =
             std::env::temp_dir().join(format!("scl_version_setting_pop_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs_err::remove_dir_all(&dir);
         let versions = dir.join("versions");
         let version_dir = versions.join("26.3");
-        std::fs::create_dir_all(&version_dir).expect("创建版本目录");
-        std::fs::write(
+        fs_err::create_dir_all(&version_dir).expect("创建版本目录");
+        fs_err::write(
             version_dir.join("26.3.json"),
             r#"{"mainClass":"net.minecraft.client.main.Main"}"#,
         )
@@ -854,16 +843,12 @@ mod tests {
             game_independent: true,
             ..Default::default()
         };
-        let saved_name = smol::block_on(persist_version_setting(
-            versions.clone(),
-            "26.3".into(),
-            "26.3".into(),
-            config,
-        ))
-        .expect("保存版本设置");
+        let saved_name =
+            persist_version_setting(versions.clone(), "26.3".into(), "26.3".into(), config)
+                .expect("保存版本设置");
         assert_eq!(saved_name, "26.3");
 
-        let json = std::fs::read_to_string(version_dir.join(".scl.json")).expect("读取 .scl.json");
+        let json = fs_err::read_to_string(version_dir.join(".scl.json")).expect("读取 .scl.json");
         assert!(json.contains("\"game_independent\":true"), "{json}");
         assert!(!json.contains("\"enable\""), "enable 是界面字段，不应写盘");
 
@@ -873,14 +858,14 @@ mod tests {
             version: "26.3".into(),
             ..Default::default()
         };
-        smol::block_on(reopened.load()).expect("重新加载版本");
+        reopened.load().expect("重新加载版本");
         let disk =
             SCLLaunchConfig::from_core(reopened.scl_launch_config.clone().expect("应存在版本配置"));
         assert!(disk.enable);
         assert!(disk.game_independent);
         assert_eq!(reopened.version_path(), version_dir);
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs_err::remove_dir_all(&dir);
     }
 
     #[test]

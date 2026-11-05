@@ -47,23 +47,27 @@ pub fn copy_to_clipboard(text: String) {
 
 /// 显示原版风格的非致命后台任务错误弹窗。
 #[cfg(target_os = "linux")]
-pub fn show_async_error_dialog(location: impl Into<String>, error: impl Into<String>) {
-    ASYNC_ERROR_DIALOGS
+pub fn show_background_error_dialog(location: impl Into<String>, error: impl Into<String>) {
+    background_error_dialogs()
         .lock()
         .unwrap()
         .push_back((location.into(), error.into()));
-    schedule_next_async_error_dialog();
+    schedule_next_background_error_dialog();
 }
 
 #[cfg(target_os = "linux")]
-static ASYNC_ERROR_DIALOGS: once_cell::sync::Lazy<
-    std::sync::Mutex<std::collections::VecDeque<(String, String)>>,
-> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+fn background_error_dialogs() -> &'static std::sync::Mutex<std::collections::VecDeque<(String, String)>>
+{
+    static BACKGROUND_ERROR_DIALOGS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<(String, String)>>,
+    > = std::sync::OnceLock::new();
+    BACKGROUND_ERROR_DIALOGS.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
 
 /// 测试专用：当前错误弹窗队列的快照（位置, 错误）。
 #[cfg(all(test, target_os = "linux"))]
-pub(crate) fn async_error_dialog_queue_snapshot() -> Vec<(String, String)> {
-    ASYNC_ERROR_DIALOGS
+pub(crate) fn background_error_dialog_queue_snapshot() -> Vec<(String, String)> {
+    background_error_dialogs()
         .lock()
         .unwrap()
         .iter()
@@ -72,39 +76,39 @@ pub(crate) fn async_error_dialog_queue_snapshot() -> Vec<(String, String)> {
 }
 
 #[cfg(target_os = "linux")]
-static ASYNC_ERROR_DIALOG_OPEN: std::sync::atomic::AtomicBool =
+static BACKGROUND_ERROR_DIALOG_OPEN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(target_os = "linux")]
 thread_local! {
     /// 保证 GTK 对话框在显示期间不会被 Rust 包装对象提前释放。
-    static CURRENT_ASYNC_ERROR_DIALOG: std::cell::RefCell<Option<gtk::MessageDialog>> =
+    static CURRENT_BACKGROUND_ERROR_DIALOG: std::cell::RefCell<Option<gtk::MessageDialog>> =
         const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(target_os = "linux")]
-fn schedule_next_async_error_dialog() {
+fn schedule_next_background_error_dialog() {
     use std::sync::atomic::Ordering;
 
-    if ASYNC_ERROR_DIALOG_OPEN.swap(true, Ordering::SeqCst) {
+    if BACKGROUND_ERROR_DIALOG_OPEN.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _ = gtk::glib::idle_add_once(show_next_async_error_dialog);
+    let _ = gtk::glib::idle_add_once(show_next_background_error_dialog);
 }
 
 #[cfg(target_os = "linux")]
-fn show_next_async_error_dialog() {
+fn show_next_background_error_dialog() {
     use std::sync::atomic::Ordering;
 
     use gtk::prelude::*;
 
-    let Some((location, error)) = ASYNC_ERROR_DIALOGS.lock().unwrap().pop_front() else {
-        ASYNC_ERROR_DIALOG_OPEN.store(false, Ordering::SeqCst);
+    let Some((location, error)) = background_error_dialogs().lock().unwrap().pop_front() else {
+        BACKGROUND_ERROR_DIALOG_OPEN.store(false, Ordering::SeqCst);
         return;
     };
 
     let body = format!(
-        "执行位于 {location} 的后台异步任务时发生错误：\n{error}\n\n\
+        "执行位于 {location} 的后台任务时发生错误：\n{error}\n\n\
          这个错误不会使程序崩溃，但是可能会重要，是否将此错误复制到剪切板？"
     );
     let dialog = gtk::MessageDialog::new(
@@ -114,7 +118,7 @@ fn show_next_async_error_dialog() {
         gtk::ButtonsType::YesNo,
         &body,
     );
-    dialog.set_title("执行异步任务发生错误");
+    dialog.set_title("执行后台任务发生错误");
     dialog.set_modal(true);
 
     // 找到 Druid 主窗口并设为父窗口，确保模态行为与原版一致。
@@ -140,17 +144,17 @@ fn show_next_async_error_dialog() {
                 if handled.replace(true) {
                     return;
                 }
-                tracing::debug!("异步任务错误弹窗响应: {response:?}");
-                CURRENT_ASYNC_ERROR_DIALOG.with(|current| {
+                tracing::debug!("后台任务错误弹窗响应: {response:?}");
+                CURRENT_BACKGROUND_ERROR_DIALOG.with(|current| {
                     *current.borrow_mut() = None;
                 });
                 dialog.close();
                 if response == gtk::ResponseType::Yes {
-                    tracing::debug!("复制异步任务错误到剪切板：{report}");
+                    tracing::debug!("复制后台任务错误到剪切板：{report}");
                     copy_to_clipboard(report.clone());
                 }
-                ASYNC_ERROR_DIALOG_OPEN.store(false, Ordering::SeqCst);
-                schedule_next_async_error_dialog();
+                BACKGROUND_ERROR_DIALOG_OPEN.store(false, Ordering::SeqCst);
+                schedule_next_background_error_dialog();
             }
         });
     }
@@ -158,7 +162,7 @@ fn show_next_async_error_dialog() {
     // No/Yes 按钮不显示蓝色焦点框；GTK 默认会把焦点放到第一个按钮，
     // 这里清空焦点。
     dialog.set_focus(None::<&gtk::Widget>);
-    CURRENT_ASYNC_ERROR_DIALOG.with(|current| {
+    CURRENT_BACKGROUND_ERROR_DIALOG.with(|current| {
         *current.borrow_mut() = Some(dialog);
     });
 }
@@ -170,22 +174,22 @@ fn show_next_async_error_dialog() {
 /// 剪切板直接调用 `GlobalAlloc`/`OpenClipboard`/`SetClipboardData`，
 /// 避免在后台线程调用需要主线程断言的 `Application::global()`。
 #[cfg(target_os = "windows")]
-pub fn show_async_error_dialog(location: impl Into<String>, error: impl Into<String>) {
+pub fn show_background_error_dialog(location: impl Into<String>, error: impl Into<String>) {
     let location = location.into();
     let error = error.into();
     let body = format!(
-        "执行位于 {location} 的后台异步任务时发生错误：\n{error}\n\n\
+        "执行位于 {location} 的后台任务时发生错误：\n{error}\n\n\
          这个错误不会使程序崩溃，但是可能会重要，是否将此错误复制到剪切板？"
     );
-    if show_windows_message_box(&body, "执行异步任务发生错误") {
+    if show_windows_message_box(&body, "执行后台任务发生错误") {
         copy_to_clipboard(error);
     }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-pub fn show_async_error_dialog(location: impl Into<String>, error: impl Into<String>) {
+pub fn show_background_error_dialog(location: impl Into<String>, error: impl Into<String>) {
     tracing::warn!(
-        "后台异步任务发生错误（{}）：{}",
+        "后台任务发生错误（{}）：{}",
         location.into(),
         error.into()
     );
@@ -198,7 +202,7 @@ fn to_wide(text: &str) -> Vec<u16> {
 
 /// 显示 Windows 原生 Yes/No 消息框，返回用户是否选择“是”。
 ///
-/// 致命错误弹窗与异步任务错误弹窗共用这一个最小 FFI 包装。
+/// 致命错误弹窗与后台任务错误弹窗共用这一个最小 FFI 包装。
 #[cfg(target_os = "windows")]
 fn show_windows_message_box(text: &str, caption: &str) -> bool {
     use std::ffi::c_void;

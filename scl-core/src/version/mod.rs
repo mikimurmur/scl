@@ -5,8 +5,6 @@ use std::path::Path;
 pub mod mods;
 pub mod structs;
 
-use inner_future::stream::StreamExt;
-
 use self::structs::VersionInfo;
 use crate::prelude::*;
 
@@ -36,9 +34,7 @@ impl Default for Version {
 }
 
 /// 通过指定的版本文件夹，搜索所有可启动的游戏版本
-pub async fn get_avaliable_versions(
-    version_directory_path: impl AsRef<Path>,
-) -> DynResult<Vec<Version>> {
+pub fn get_avaliable_versions(version_directory_path: impl AsRef<Path>) -> DynResult<Vec<Version>> {
     let mut version_info = VersionInfo {
         version_base: version_directory_path
             .as_ref()
@@ -47,10 +43,10 @@ pub async fn get_avaliable_versions(
         ..Default::default()
     };
     if version_directory_path.as_ref().is_dir() {
-        let mut entries = inner_future::fs::read_dir(version_directory_path.as_ref()).await?;
         let mut result = Vec::with_capacity(32);
-        while let Some(entry) = entries.try_next().await? {
-            let (created_date, access_date) = if let Ok(metadata) = entry.metadata().await {
+        for entry in fs_err::read_dir(version_directory_path.as_ref())? {
+            let entry = entry?;
+            let (created_date, access_date) = if let Ok(metadata) = entry.metadata() {
                 (
                     metadata
                         .created()
@@ -65,7 +61,7 @@ pub async fn get_avaliable_versions(
                     std::time::SystemTime::UNIX_EPOCH,
                 )
             };
-            if entry.file_type().await?.is_dir() {
+            if entry.file_type()?.is_dir() {
                 let entry = entry
                     .path()
                     .file_name()
@@ -74,7 +70,7 @@ pub async fn get_avaliable_versions(
                     .unwrap()
                     .to_string();
                 version_info.version = entry.to_owned();
-                if version_info.load().await.is_ok() {
+                if version_info.load().is_ok() {
                     result.push(Version {
                         name: entry,
                         version_type: version_info.guess_version_type(),

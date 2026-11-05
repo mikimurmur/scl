@@ -230,7 +230,6 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
     let download_source = RadioGroup::column(vec![
         ("默认（官方）下载源", DownloadSource::Default),
         ("BMCLAPI 下载源", DownloadSource::BmclApi),
-        ("MCBBS 下载源", DownloadSource::Mcbbs),
     ])
     .lens(AppState::config.then(Config::download_source));
 

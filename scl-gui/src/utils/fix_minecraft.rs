@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use anyhow::Context;
-use futures::TryStreamExt;
 use scl_core::{
     download::{authlib::AuthlibDownloadExt, vanilla::VanillaDownloadExt, Downloader},
     progress::Reporter,
@@ -13,7 +12,7 @@ use scl_core::{
 use crate::{core::DownloadSource, utils::prelude};
 
 /// 检查并修复指定游戏文件夹下的所有版本，返回修复的版本数量
-pub async fn fix_minecraft<P: AsRef<Path>, R: Reporter>(
+pub fn fix_minecraft<P: AsRef<Path>, R: Reporter>(
     minecraft_folder: P,
     source: DownloadSource,
     parallel_amount: usize,
@@ -21,7 +20,7 @@ pub async fn fix_minecraft<P: AsRef<Path>, R: Reporter>(
 ) -> anyhow::Result<usize> {
     let folder = minecraft_folder.as_ref();
     let versions_dir = folder.join("versions");
-    let mut entries = match smol::fs::read_dir(&versions_dir).await {
+    let entries = match fs_err::read_dir(&versions_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(err) => {
@@ -33,15 +32,15 @@ pub async fn fix_minecraft<P: AsRef<Path>, R: Reporter>(
         .with_source(source.to_core())
         .with_minecraft_path(folder)
         .with_parallel_amount(parallel_amount)
-        .with_verify_data()
         .with_reporter(reporter);
 
-    if let Err(err) = downloader.install_authlib_injector().await {
+    if let Err(err) = downloader.install_authlib_injector() {
         tracing::warn!("安装 Authlib-Injector 失败：{err:?}");
     }
 
     let mut fixed = 0;
-    while let Some(entry) = entries.try_next().await? {
+    for entry in entries {
+        let entry = entry?;
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -49,7 +48,7 @@ pub async fn fix_minecraft<P: AsRef<Path>, R: Reporter>(
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        fixed += fix_version_dir(&downloader, &path, name).await?;
+        fixed += fix_version_dir(&downloader, &path, name)?;
     }
     Ok(fixed)
 }
@@ -58,7 +57,7 @@ pub async fn fix_minecraft<P: AsRef<Path>, R: Reporter>(
 ///
 /// 官方「补全/修复版本文件」按钮只对当前打开的那个版本调用
 /// `fix_minecraft`，不会扫描整个 `.minecraft/versions`。
-pub async fn fix_minecraft_version<P: AsRef<Path>, R: Reporter>(
+pub fn fix_minecraft_version<P: AsRef<Path>, R: Reporter>(
     minecraft_folder: P,
     version: &VersionInfo,
     source: DownloadSource,
@@ -76,23 +75,23 @@ pub async fn fix_minecraft_version<P: AsRef<Path>, R: Reporter>(
         .with_source(source.to_core())
         .with_minecraft_path(folder)
         .with_parallel_amount(parallel_amount)
-        .with_verify_data()
         .with_reporter(reporter);
 
-    if let Err(err) = downloader.install_authlib_injector().await {
+    if let Err(err) = downloader.install_authlib_injector() {
         tracing::warn!("安装 Authlib-Injector 失败：{err:?}");
     }
 
-    fix_version_dir(&downloader, &version_path, &version.version).await
+    fix_version_dir(&downloader, &version_path, &version.version)
 }
 
 /// 执行单个版本目录的 JSON 修复与文件校验/补全，返回修复计数。
-async fn fix_version_dir<R: Reporter>(
+fn fix_version_dir<R: Reporter>(
     downloader: &Downloader<R>,
     path: &Path,
     name: &str,
 ) -> anyhow::Result<usize> {
     let mut fixed = 0;
+    let repaired_files_before = downloader.repaired_file_count();
     let json_path = path.join(format!("{name}.json"));
     if !version_json_healthy(&json_path) {
         let jar_path = path.join(format!("{name}.jar"));
@@ -101,8 +100,7 @@ async fn fix_version_dir<R: Reporter>(
         }
         match extract_version_json_from_jar(&jar_path) {
             Ok(Some(data)) => {
-                prelude::write_file_safe_async(&json_path, data)
-                    .await
+                prelude::write_file_safe(&json_path, data)
                     .with_context(|| format!("写入版本文件 {} 失败", json_path.display()))?;
                 tracing::info!("已从客户端 JAR 修复版本 {name}");
                 fixed += 1;
@@ -118,7 +116,7 @@ async fn fix_version_dir<R: Reporter>(
         }
     }
 
-    let data = match std::fs::read(&json_path) {
+    let data = match fs_err::read(&json_path) {
         Ok(data) => data,
         Err(err) => {
             tracing::warn!("读取版本 {name} 的 JSON 失败：{err:?}");
@@ -145,9 +143,13 @@ async fn fix_version_dir<R: Reporter>(
     if !parent_name.is_empty() {
         let parent_json = path
             .parent()
-            .map(|versions| versions.join(&parent_name).join(format!("{parent_name}.json")))
+            .map(|versions| {
+                versions
+                    .join(&parent_name)
+                    .join(format!("{parent_name}.json"))
+            })
             .unwrap_or_else(|| Path::new(".").join(format!("{parent_name}.json")));
-        let parent_meta = std::fs::read(&parent_json)
+        let parent_meta = fs_err::read(&parent_json)
             .ok()
             .and_then(|data| serde_json::from_slice::<VersionMeta>(&data).ok());
         match parent_meta {
@@ -157,9 +159,7 @@ async fn fix_version_dir<R: Reporter>(
                 meta = merged;
             }
             None => {
-                tracing::warn!(
-                    "版本 {name} 的父版本 {parent_name} 元数据不可用，跳过文件补全"
-                );
+                tracing::warn!("版本 {name} 的父版本 {parent_name} 元数据不可用，跳过文件补全");
                 return Ok(fixed);
             }
         }
@@ -174,37 +174,34 @@ async fn fix_version_dir<R: Reporter>(
     let jar_path = path.join(format!("{name}.jar"));
     if !jar_path.is_file() {
         if let Some(main_jar) = meta.downloads.as_ref().and_then(|d| d.get("client")) {
-            if let Err(err) = downloader
-                .download_vanilla_jar(
-                    &main_jar.url,
-                    &jar_path.to_string_lossy(),
-                    &main_jar.sha1,
-                )
-                .await
-            {
+            if let Err(err) = downloader.download_vanilla_jar(
+                &main_jar.url,
+                &jar_path.to_string_lossy(),
+                &main_jar.sha1,
+                main_jar.size as u64,
+            ) {
                 tracing::warn!("补全版本 {name} 的客户端 JAR 失败：{err:?}");
             } else {
                 tracing::info!("已补全版本 {name} 的客户端 JAR");
-                fixed += 1;
             }
         }
     }
     // 修复模式：只校验并补全依赖库/资源，JAR 已在上方按缺失情况补齐。
-    match downloader.download_vanilla(name, &meta, true).await {
+    match downloader.download_vanilla(name, &meta, true) {
         Ok(()) => {
             tracing::info!("已校验/补全版本 {name} 的游戏文件");
-            fixed += 1;
         }
         Err(err) => {
             tracing::warn!("修复版本 {name} 的游戏文件失败：{err:?}");
         }
     }
+    fixed += downloader.repaired_file_count() - repaired_files_before;
     Ok(fixed)
 }
 
 /// 版本 JSON 是否存在且可以正常解析
 fn version_json_healthy(json_path: &Path) -> bool {
-    match std::fs::read(json_path) {
+    match fs_err::read(json_path) {
         Ok(data) => serde_json::from_slice::<serde_json::Value>(&data).is_ok(),
         Err(_) => false,
     }
@@ -212,7 +209,7 @@ fn version_json_healthy(json_path: &Path) -> bool {
 
 /// 从客户端 JAR（zip 格式）中读取内嵌的 version.json
 fn extract_version_json_from_jar(jar_path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
-    let file = std::fs::File::open(jar_path)?;
+    let file = fs_err::File::open(jar_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
     let mut entry = match archive.by_name("version.json") {
         Ok(entry) => entry,
@@ -233,11 +230,11 @@ mod tests {
 
     fn write_broken_version(root: &Path, name: &str) {
         let dir = root.join("versions").join(name);
-        std::fs::create_dir_all(&dir).expect("创建版本目录");
-        std::fs::write(dir.join(format!("{name}.json")), "{broken").expect("写入损坏 JSON");
-        let jar = std::fs::File::create(dir.join(format!("{name}.jar"))).expect("创建 JAR");
+        fs_err::create_dir_all(&dir).expect("创建版本目录");
+        fs_err::write(dir.join(format!("{name}.json")), "{broken").expect("写入损坏 JSON");
+        let jar = fs_err::File::create(dir.join(format!("{name}.jar"))).expect("创建 JAR");
         let mut zip = zip::ZipWriter::new(jar);
-        zip.start_file("version.json", zip::write::FileOptions::default())
+        zip.start_file("version.json", zip::write::SimpleFileOptions::default())
             .expect("写入 JAR 条目");
         zip.write_all(br#"{"mainClass":"net.minecraft.client.main.Main"}"#)
             .expect("写入内嵌 version.json");
@@ -247,38 +244,32 @@ mod tests {
     #[test]
     fn version_level_fix_only_repairs_target_version() {
         let dir = std::env::temp_dir().join(format!("scl_fix_version_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs_err::remove_dir_all(&dir);
         let mc = dir.join(".minecraft");
         write_broken_version(&mc, "Target");
         write_broken_version(&mc, "Other");
         // 避免 install_authlib_injector 触发网络下载
-        std::fs::write(mc.join("authlib-injector.jar"), []).expect("创建占位注入器");
+        fs_err::write(mc.join("authlib-injector.jar"), []).expect("创建占位注入器");
 
         let info = VersionInfo {
             version_base: mc.join("versions").to_string_lossy().to_string(),
             version: "Target".into(),
             ..Default::default()
         };
-        let fixed = smol::block_on(fix_minecraft_version(
-            &mc,
-            &info,
-            DownloadSource::Default,
-            1,
-            (),
-        ))
-        .expect("版本级修复应成功");
+        let fixed = fix_minecraft_version(&mc, &info, DownloadSource::Default, 1, ())
+            .expect("版本级修复应成功");
         assert_eq!(fixed, 1, "应修复目标版本 JSON");
 
         let target =
-            std::fs::read_to_string(mc.join("versions/Target/Target.json")).expect("读取目标 JSON");
+            fs_err::read_to_string(mc.join("versions/Target/Target.json")).expect("读取目标 JSON");
         assert!(
             serde_json::from_str::<serde_json::Value>(&target).is_ok(),
             "{target}"
         );
         let other =
-            std::fs::read_to_string(mc.join("versions/Other/Other.json")).expect("读取其他 JSON");
+            fs_err::read_to_string(mc.join("versions/Other/Other.json")).expect("读取其他 JSON");
         assert_eq!(other, "{broken", "版本级修复不应改动其它版本");
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs_err::remove_dir_all(&dir);
     }
 }

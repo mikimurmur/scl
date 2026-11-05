@@ -104,7 +104,7 @@ pub struct NewForgeModMeta {
 
 impl Mod {
     /// 通过模组文件路径获取当前模组的信息
-    pub async fn from_path(path: impl AsRef<Path>) -> DynResult<Self> {
+    pub fn from_path(path: impl AsRef<Path>) -> DynResult<Self> {
         let path = path.as_ref();
         let file_name = path.file_name().unwrap().to_string_lossy().to_string();
         let enabled = !file_name.ends_with(".disabled");
@@ -126,8 +126,8 @@ impl Mod {
     }
 
     /// 尝试获取一个可供显示的模组名称
-    pub async fn display_name(&self) -> String {
-        self.try_get_mod_name().await.unwrap_or_else(|_| {
+    pub fn display_name(&self) -> String {
+        self.try_get_mod_name().unwrap_or_else(|_| {
             self.file_name()
                 .trim_end_matches(".jar.disabled")
                 .trim_end_matches(".jar")
@@ -141,55 +141,52 @@ impl Mod {
     }
 
     /// 尝试获取模组的元数据信息
-    pub async fn try_get_mod_meta(&self) -> DynResult<ModMeta> {
+    pub fn try_get_mod_meta(&self) -> DynResult<ModMeta> {
         let path = self.path.to_owned();
-        inner_future::unblock(move || -> DynResult<ModMeta> {
-            let mut z = zip::ZipArchive::new(
-                std::fs::OpenOptions::new()
-                    .read(true)
-                    .open(&path)
-                    .with_context(|| format!("无法打开模组文件 {}", path.to_string_lossy()))
-                    .with_context(|| format!("无法读取模组文件 {}", path.to_string_lossy()))?,
-            )?;
-            if let Ok(meta) = z.by_name("fabric.mod.json").and_then(|r| {
-                serde_json::from_reader::<_, FabricModMeta>(r)
-                    .map_err(|_| zip::result::ZipError::InvalidArchive("fabric.mod.json"))
-            }) {
-                // fabric.mod.json https://github.com/FabricMC/fabric-example-mod/blob/1.19/src/main/resources/fabric.mod.json
-                Ok(ModMeta::Fabric(meta))
-            } else if let Ok(meta) = z.by_name("mods.toml").and_then(|mut r| {
-                // mods.toml https://docs.minecraftforge.net/en/1.19.x/gettingstarted/structuring/
-                let mut buf = String::with_capacity(r.size() as _);
-                r.read_to_string(&mut buf).unwrap_or_default();
-                toml::from_str::<NewForgeModMeta>(&buf)
-                    .map_err(|_| zip::result::ZipError::InvalidArchive("mods.toml"))
-            }) {
-                Ok(ModMeta::Forge(meta.mods.first().cloned().ok_or_else(
-                    || anyhow::anyhow!("Can't get mod info from mcmod.info"),
-                )?))
-            } else if let Ok(meta) = z.by_name("mcmod.info").and_then(|r| {
-                // mcmod.info https://docs.minecraftforge.net/en/1.12.x/gettingstarted/structuring/
-                serde_json::from_reader::<_, Vec<ForgeModMeta>>(r)
-                    .map_err(|_| zip::result::ZipError::InvalidArchive("mcmod.info"))
-            }) {
-                Ok(ModMeta::Forge(meta.first().cloned().ok_or_else(|| {
-                    anyhow::anyhow!("Can't get mod info from mcmod.info")
-                })?))
-            } else {
-                anyhow::bail!("Mod name not found")
-            }
-        })
-        .await
+        let mut z = zip::ZipArchive::new(
+            fs_err::OpenOptions::new()
+                .read(true)
+                .open(&path)
+                .with_context(|| format!("无法打开模组文件 {}", path.to_string_lossy()))
+                .with_context(|| format!("无法读取模组文件 {}", path.to_string_lossy()))?,
+        )?;
+        if let Ok(meta) = z.by_name("fabric.mod.json").and_then(|r| {
+            serde_json::from_reader::<_, FabricModMeta>(r)
+                .map_err(|_| zip::result::ZipError::InvalidArchive("fabric.mod.json".into()))
+        }) {
+            // fabric.mod.json https://github.com/FabricMC/fabric-example-mod/blob/1.19/src/main/resources/fabric.mod.json
+            Ok(ModMeta::Fabric(meta))
+        } else if let Ok(meta) = z.by_name("mods.toml").and_then(|mut r| {
+            // mods.toml https://docs.minecraftforge.net/en/1.19.x/gettingstarted/structuring/
+            let mut buf = String::with_capacity(r.size() as _);
+            r.read_to_string(&mut buf).unwrap_or_default();
+            toml::from_str::<NewForgeModMeta>(&buf)
+                .map_err(|_| zip::result::ZipError::InvalidArchive("mods.toml".into()))
+        }) {
+            Ok(ModMeta::Forge(meta.mods.first().cloned().ok_or_else(
+                || anyhow::anyhow!("Can't get mod info from mcmod.info"),
+            )?))
+        } else if let Ok(meta) = z.by_name("mcmod.info").and_then(|r| {
+            // mcmod.info https://docs.minecraftforge.net/en/1.12.x/gettingstarted/structuring/
+            serde_json::from_reader::<_, Vec<ForgeModMeta>>(r)
+                .map_err(|_| zip::result::ZipError::InvalidArchive("mcmod.info".into()))
+        }) {
+            Ok(ModMeta::Forge(meta.first().cloned().ok_or_else(|| {
+                anyhow::anyhow!("Can't get mod info from mcmod.info")
+            })?))
+        } else {
+            anyhow::bail!("Mod name not found")
+        }
     }
 
     /// [`Mod::try_get_mod_meta`] 的语法糖，尝试根据模组元数据获取模组名称
-    pub async fn try_get_mod_name(&self) -> DynResult<String> {
-        Ok(self.try_get_mod_meta().await?.name().to_owned())
+    pub fn try_get_mod_name(&self) -> DynResult<String> {
+        Ok(self.try_get_mod_meta()?.name().to_owned())
     }
 
     /// [`Mod::try_get_mod_meta`] 的语法糖，尝试根据模组元数据获取模组的其中一个图标
-    pub async fn try_get_mod_icon(&self) -> DynResult<DynamicImage> {
-        let icon_path = match self.try_get_mod_meta().await? {
+    pub fn try_get_mod_icon(&self) -> DynResult<DynamicImage> {
+        let icon_path = match self.try_get_mod_meta()? {
             ModMeta::Fabric(meta) => match meta.icon {
                 Some(FabricModIcon::Multiply(icon)) => {
                     icon.iter().next().map(|x| x.0.to_owned()).ok_or_else(|| {
@@ -202,24 +199,21 @@ impl Mod {
             ModMeta::Forge(meta) => meta.logo_file,
         };
         let path = self.path.to_owned();
-        inner_future::unblock(move || -> DynResult<DynamicImage> {
-            let mut z = zip::ZipArchive::new(std::fs::OpenOptions::new().read(true).open(path)?)?;
-            let mut r = z.by_name(icon_path.trim_start_matches(['/', '\\']))?;
-            let mut buf = Vec::with_capacity(r.size() as _);
-            r.read_to_end(&mut buf)?;
-            Ok(image::load_from_memory(&buf)?)
-        })
-        .await
+        let mut z = zip::ZipArchive::new(fs_err::OpenOptions::new().read(true).open(path)?)?;
+        let mut r = z.by_name(icon_path.trim_start_matches(['/', '\\']))?;
+        let mut buf = Vec::with_capacity(r.size() as _);
+        r.read_to_end(&mut buf)?;
+        Ok(image::load_from_memory(&buf)?)
     }
 
     /// 如果模组是禁用的（既以 `.jar.disabled` 结尾），启用该模组（既还原成 `.jar` 结尾）
     ///
     /// 如果重命名失败则会返回错误
-    pub async fn enable(&mut self) -> DynResult {
+    pub fn enable(&mut self) -> DynResult {
         if self.file_name.ends_with(".disabled") && !self.enabled {
             let mut path = self.path.clone();
             path.set_file_name(&self.file_name[..self.file_name.len() - 9]);
-            inner_future::fs::rename(&self.path, &path).await?;
+            fs_err::rename(&self.path, &path)?;
             self.file_name = path.file_name().unwrap().to_string_lossy().to_string();
             self.path = path;
             self.enabled = true;
@@ -230,7 +224,7 @@ impl Mod {
     /// 如果模组是启用的（既以 `.jar` 结尾），禁用该模组（既重命名为以 `.jar.disabled` 结尾）
     ///
     /// 如果重命名失败则会返回错误
-    pub async fn disable(&mut self) -> DynResult {
+    pub fn disable(&mut self) -> DynResult {
         if !self.file_name.ends_with(".disabled") && self.enabled {
             let mut path = self.path.clone();
             path.set_file_name(&self.file_name);
@@ -240,7 +234,7 @@ impl Mod {
                     .map(|x| x.to_string_lossy())
                     .unwrap_or_default()
             ));
-            inner_future::fs::rename(&self.path, &path).await?;
+            fs_err::rename(&self.path, &path)?;
             self.file_name = path.file_name().unwrap().to_string_lossy().to_string();
             self.path = path;
             self.enabled = false;
@@ -249,8 +243,8 @@ impl Mod {
     }
 
     /// 删除该模组，**此操作不可撤销**
-    pub async fn remove(self) -> DynResult {
-        inner_future::fs::remove_file(self.path).await?;
+    pub fn remove(self) -> DynResult {
+        fs_err::remove_file(self.path)?;
         Ok(())
     }
 }

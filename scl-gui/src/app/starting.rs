@@ -1,8 +1,6 @@
 //! 启动器启动时的初始化逻辑，以及启动游戏。
 
-use anyhow::Context as _;
 use druid::{EventCtx, ExtEventSink, Target};
-use futures::{io::BufReader, AsyncBufReadExt};
 use scl_core::{
     client::{Client, ClientConfig},
     java::JavaRuntime,
@@ -19,8 +17,8 @@ use crate::{
 
 /// 扫描版本文件夹并把结果发送回界面
 pub fn load_versions(sink: ExtEventSink, versions_path: std::path::PathBuf) {
-    thread_main(async move {
-        let versions = prelude::load_game_versions(&versions_path).await?;
+    thread_main(move || {
+        let versions = prelude::load_game_versions(&versions_path)?;
         let _ = sink.submit_command(
             APP_EVENT,
             AppEvent::VersionsLoaded(versions),
@@ -32,14 +30,14 @@ pub fn load_versions(sink: ExtEventSink, versions_path: std::path::PathBuf) {
 
 /// 扫描系统中的 Java 运行时
 pub fn load_java(sink: ExtEventSink) {
-    thread_main(async move {
-        let mut candidates = scl_core::java::search_for_java().await;
+    thread_main(move || {
+        let mut candidates = scl_core::java::search_for_java();
         if candidates.is_empty() {
             candidates.push("java".into());
         }
         let mut result = Vec::new();
         for path in candidates {
-            if let Ok(runtime) = JavaRuntime::from_java_path(&path).await {
+            if let Ok(runtime) = JavaRuntime::from_java_path(&path) {
                 result.push(JavaRuntimeInfo {
                     path: runtime.path().to_owned(),
                     name: format!("Java {} ({})", runtime.version(), runtime.main_version()),
@@ -371,17 +369,17 @@ mod linux_window_scan {
 }
 
 #[cfg(target_os = "windows")]
-pub async fn wait_for_game_window(_pid: u32) -> bool {
+pub fn wait_for_game_window(_pid: u32) -> bool {
     let baseline = win_window_scan::scan_game_windows();
     loop {
-        smol::Timer::after(std::time::Duration::from_millis(64)).await;
+        std::thread::sleep(std::time::Duration::from_millis(64));
         let current = win_window_scan::scan_game_windows();
         let fresh: Vec<_> = current.difference(&baseline).copied().collect();
         if fresh.is_empty() {
             continue;
         }
         for _ in 0..150 {
-            smol::Timer::after(std::time::Duration::from_millis(200)).await;
+            std::thread::sleep(std::time::Duration::from_millis(200));
             if fresh
                 .iter()
                 .any(|&hwnd| win_window_scan::is_window_visible(hwnd))
@@ -393,21 +391,51 @@ pub async fn wait_for_game_window(_pid: u32) -> bool {
     }
 }
 
+/// 等待游戏窗口出现，最多等待 `timeout`
+///
+/// 对应官方「不等待游戏启动」的 1 秒观察窗口：超时后无论是否发现窗口都继续流程。
+pub fn wait_for_game_window_for(pid: u32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if game_window_exists(pid) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(64));
+    }
+    false
+}
+
 #[cfg(target_os = "linux")]
-pub async fn wait_for_game_window(pid: u32) -> bool {
+fn game_window_exists(pid: u32) -> bool {
+    linux_window_scan::game_window_exists(pid)
+}
+
+#[cfg(target_os = "windows")]
+fn game_window_exists(_pid: u32) -> bool {
+    // Windows 分支已有独立的基线差分等待逻辑，这里仅用于带超时的观察窗口。
+    !win_window_scan::scan_game_windows().is_empty()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn game_window_exists(_pid: u32) -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+pub fn wait_for_game_window(pid: u32) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     while std::time::Instant::now() < deadline {
         if linux_window_scan::game_window_exists(pid) {
             return true;
         }
-        smol::Timer::after(std::time::Duration::from_millis(200)).await;
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
     false
 }
 
 /// 其它平台：无法枚举窗口，按「进程已启动」处理。
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-pub async fn wait_for_game_window(_pid: u32) -> bool {
+pub fn wait_for_game_window(_pid: u32) -> bool {
     true
 }
 
@@ -440,7 +468,7 @@ pub fn start_game(ctx: &mut EventCtx, data: &mut AppState) {
     data.launch_window_ready = false;
     data.starting_tip = Some(crate::ui::starting::random_tip());
     data.launch_error = None;
-    thread_main(async move {
+    thread_main(move || {
         let result = launch_game(
             sink.clone(),
             version_name,
@@ -448,8 +476,7 @@ pub fn start_game(ctx: &mut EventCtx, data: &mut AppState) {
             account,
             cfg,
             recheck,
-        )
-        .await;
+        );
         if let Err(err) = result {
             tracing::error!("启动环节发生错误: {err}");
             let _ = sink.submit_command(
@@ -462,7 +489,7 @@ pub fn start_game(ctx: &mut EventCtx, data: &mut AppState) {
     });
 }
 
-async fn launch_game(
+fn launch_game(
     sink: ExtEventSink,
     version_name: String,
     version_base: std::path::PathBuf,
@@ -478,7 +505,7 @@ async fn launch_game(
         version: version_name,
         ..Default::default()
     };
-    version_info.load().await?;
+    version_info.load()?;
     // 与官方启动流程一致：版本没有独立配置时，用全局“版本隔离方式”
     // 计算本次启动是否隔离；有独立配置时以版本设置为准（覆盖全局）。
     if version_info.scl_launch_config.is_none() {
@@ -523,7 +550,7 @@ async fn launch_game(
         tracing::info!("选择 Java < 16 运行环境: {}", java_info.path);
         (java_info.path.clone(), "< 16")
     };
-    let runtime = match JavaRuntime::from_java_path(&java_path).await {
+    let runtime = match JavaRuntime::from_java_path(&java_path) {
         Ok(runtime) => runtime,
         Err(err) => {
             match java_branch {
@@ -544,7 +571,6 @@ async fn launch_game(
         let mem_status = scl_core::utils::get_mem_status();
         let mod_count = version_info
             .get_mods()
-            .await
             .map(|mods| mods.len())
             .unwrap_or_default();
         let automated = crate::config::automated_max_memory(mem_status.free, mod_count);
@@ -575,8 +601,7 @@ async fn launch_game(
         java_runtime: runtime,
         max_mem,
         recheck,
-    })
-    .await?;
+    })?;
     let mut client = client;
     tracing::info!(
         "启动工作目录：{}（game_independent={}）",
@@ -600,7 +625,7 @@ async fn launch_game(
     }
     client.set_stdout(std::process::Stdio::piped());
     client.set_stderr(std::process::Stdio::piped());
-    let pid = match client.launch().await {
+    let pid = match client.launch() {
         Ok(pid) => pid,
         Err(err) => {
             tracing::error!("启动 Java 进程时发生错误");
@@ -611,53 +636,51 @@ async fn launch_game(
     let _ = sink.submit_command(APP_EVENT, AppEvent::GameStarted(pid), Target::Global);
 
     // 捕获游戏输出日志，供启动失败页面复制崩溃日志使用
-    let mut stdout_log = None;
-    let mut stderr_log = None;
     let mut child = client.process.take();
-    if let Some(process) = child.as_mut() {
-        stdout_log = process.stdout.take().map(BufReader::new);
-        stderr_log = process.stderr.take().map(BufReader::new);
-    }
-    drop(client);
-    let stdout_task = async {
-        if let Some(reader) = stdout_log {
-            handle_stdout_logging(reader, sink.clone()).await;
-        }
-    };
-    let stderr_task = async {
-        if let Some(reader) = stderr_log {
-            handle_stderr_logging(reader, sink.clone()).await;
-        }
-    };
-    futures::join!(stdout_task, stderr_task);
-    // 等待游戏进程退出并记录返回值
-    if let Some(mut c) = child {
-        if let Ok(status) = c.status().await {
-            add_log(
-                &sink,
-                format!("进程已退出，返回值：{}", status.code().unwrap_or(-1)),
-            );
-            // 非零返回值视为启动后崩溃：交给界面展示「游戏启动了，但是出错了……」页面，
-            // 页面里的日志已经包含 stdout/stderr 捕获到的 Java 输出。
-            if !status.success() {
-                tracing::warn!("游戏尚未显示窗口时已经报错退出");
-                let _ = sink.submit_command(
-                    APP_EVENT,
-                    AppEvent::GameCrashed(status.code()),
-                    Target::Global,
-                );
-            } else {
-                let _ = sink.submit_command(APP_EVENT, AppEvent::GameWindowReady, Target::Global);
+
+    // stdout 与 stderr 需要同时读取，否则管道写满后游戏会被阻塞。
+    // 两个读取线程与进程等待在同一个 scope 内并行执行。
+    std::thread::scope(|scope| {
+        if let Some(process) = child.as_mut() {
+            if let Some(reader) = process.stdout.take() {
+                let sink = sink.clone();
+                scope.spawn(move || handle_stdout_logging(std::io::BufReader::new(reader), sink));
+            }
+            if let Some(reader) = process.stderr.take() {
+                let sink = sink.clone();
+                scope.spawn(move || handle_stderr_logging(std::io::BufReader::new(reader), sink));
             }
         }
-    }
+        // 等待游戏进程退出并记录返回值
+        if let Some(c) = child.as_mut() {
+            if let Ok(status) = c.wait() {
+                add_log(
+                    &sink,
+                    format!("进程已退出，返回值：{}", status.code().unwrap_or(-1)),
+                );
+                // 非零返回值视为启动后崩溃：交给界面展示「游戏启动了，但是出错了……」页面，
+                // 页面里的日志已经包含 stdout/stderr 捕获到的 Java 输出。
+                if !status.success() {
+                    tracing::warn!("游戏尚未显示窗口时已经报错退出");
+                    let _ = sink.submit_command(
+                        APP_EVENT,
+                        AppEvent::GameCrashed(status.code()),
+                        Target::Global,
+                    );
+                } else {
+                    let _ =
+                        sink.submit_command(APP_EVENT, AppEvent::GameWindowReady, Target::Global);
+                }
+            }
+        }
+    });
     Ok(())
 }
 
 /// 启动前把游戏目录里的 options.txt 的 narrator 设为 0（关闭旁白）
 fn disable_narrator(game_dir: &str) -> anyhow::Result<()> {
     let path = std::path::Path::new(game_dir).join("options.txt");
-    let data = match std::fs::read_to_string(&path) {
+    let data = match fs_err::read_to_string(&path) {
         Ok(data) => data,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(err) => return Err(err.into()),
@@ -679,7 +702,7 @@ fn disable_narrator(game_dir: &str) -> anyhow::Result<()> {
         changed = true;
     }
     if changed {
-        std::fs::write(&path, format!("{}\n", lines.join("\n")))?;
+        fs_err::write(&path, format!("{}\n", lines.join("\n")))?;
         tracing::info!("已关闭 Minecraft narrator");
     }
     Ok(())
@@ -691,14 +714,15 @@ fn add_log(sink: &ExtEventSink, line: String) {
 }
 
 /// 持续读取游戏标准输出日志
-async fn handle_stdout_logging(
-    mut reader: BufReader<smol::process::ChildStdout>,
+fn handle_stdout_logging(
+    mut reader: std::io::BufReader<std::process::ChildStdout>,
     sink: ExtEventSink,
 ) {
+    use std::io::BufRead;
     let mut line = String::new();
     loop {
         line.clear();
-        match reader.read_line(&mut line).await {
+        match reader.read_line(&mut line) {
             Ok(0) | Err(_) => break,
             Ok(_) => {
                 let trimmed = line.trim_end_matches(['\n', '\r']);
@@ -711,14 +735,15 @@ async fn handle_stdout_logging(
 }
 
 /// 持续读取游戏标准错误日志
-async fn handle_stderr_logging(
-    mut reader: BufReader<smol::process::ChildStderr>,
+fn handle_stderr_logging(
+    mut reader: std::io::BufReader<std::process::ChildStderr>,
     sink: ExtEventSink,
 ) {
+    use std::io::BufRead;
     let mut line = String::new();
     loop {
         line.clear();
-        match reader.read_line(&mut line).await {
+        match reader.read_line(&mut line) {
             Ok(0) | Err(_) => break,
             Ok(_) => {
                 let trimmed = line.trim_end_matches(['\n', '\r']);
@@ -736,7 +761,7 @@ async fn handle_stderr_logging(
 /// “欢迎使用 SCL！正在初始化一些设置……”→“正在挑选一个合适的下载源……”→
 /// “正在检查正版登录可用性”→ “访问令牌检查失败！/访问令牌准备完毕！”。
 pub fn init_settings(sink: ExtEventSink, config: Config) {
-    thread_main(async move {
+    thread_main(move || {
         use scl_core::{
             download::{vanilla::VanillaDownloadExt, Downloader},
             progress::{ReportState, Reporter},
@@ -753,16 +778,12 @@ pub fn init_settings(sink: ExtEventSink, config: Config) {
         set_tip("欢迎使用 SCL！正在初始化一些设置……");
         set_tip("正在挑选一个合适的下载源……");
 
-        let candidates = [
-            DownloadSource::BmclApi,
-            DownloadSource::Mcbbs,
-            DownloadSource::Default,
-        ];
+        let candidates = [DownloadSource::BmclApi, DownloadSource::Default];
         let mut best: Option<(std::time::Duration, DownloadSource)> = None;
         for source in candidates {
             let start = std::time::Instant::now();
             let downloader = Downloader::<()>::default().with_source(source.to_core());
-            if downloader.get_avaliable_vanilla_versions().await.is_ok() {
+            if downloader.get_avaliable_vanilla_versions().is_ok() {
                 let elapsed = start.elapsed();
                 tracing::info!("下载源 {} 测速完成：{:?}", source.display_name(), elapsed);
                 if best.as_ref().map_or(true, |(t, _)| elapsed < *t) {
@@ -783,7 +804,7 @@ pub fn init_settings(sink: ExtEventSink, config: Config) {
         for account in config.accounts_data.accounts.iter_mut() {
             if matches!(account, crate::core::AuthMethod::Mojang { .. }) {
                 let mut core = account.to_owned().into_core();
-                match scl_core::auth::refresh_auth(&mut core, &config.client_token).await {
+                match scl_core::auth::refresh_auth(&mut core, &config.client_token) {
                     Ok(true) => {
                         let updated = crate::core::AuthMethod::from_core(core);
                         *account = updated;
@@ -821,7 +842,7 @@ fn split_launch_args(args: &str, context: &str) -> anyhow::Result<Vec<String>> {
     if args.is_empty() {
         return Ok(Vec::new());
     }
-    shell_words::split(args).with_context(|| format!("{context}: {args:?}"))
+    scl_core::utils::split_command_line(args).ok_or_else(|| anyhow::anyhow!("{context}: {args:?}"))
 }
 
 #[cfg(test)]
@@ -871,7 +892,7 @@ mod tests {
     fn split_launch_args_matches_official() {
         // 空串：官方先判 len==0 直接跳过，得到空参数表
         assert!(split_launch_args("", "ctx").unwrap().is_empty());
-        // 只有空白：shell_words 视为无参数
+        // 只有空白：shlex 视为无参数
         assert!(split_launch_args(" \n\t ", "ctx").unwrap().is_empty());
         // 普通空白切分
         assert_eq!(

@@ -32,7 +32,7 @@ pub fn load_vanilla(ctx: &mut EventCtx, data: &mut AppState) {
     let sink = ctx.get_external_handle();
     let config = data.config.to_owned();
     let path = data.minecraft_folder();
-    thread_main_report(async move {
+    thread_main_report(move || {
         // 元数据请求不属于下载队列，原版使用 `Downloader<()>`，不会在界面底部
         // 创建进度条（`Progress::new` 会注册一条空进度并长期占用进度区域）。
         let downloader = Downloader::<()>::default()
@@ -41,7 +41,6 @@ pub fn load_vanilla(ctx: &mut EventCtx, data: &mut AppState) {
             .with_parallel_amount(config.download_parallel_amount);
         let result = downloader
             .get_avaliable_vanilla_versions()
-            .await
             .map(|manifest| {
                 manifest
                     .versions
@@ -52,7 +51,7 @@ pub fn load_vanilla(ctx: &mut EventCtx, data: &mut AppState) {
             .map_err(|err| format!("{err:?}"));
         let err = result.as_ref().err().cloned();
         let _ = sink.submit_command(APP_EVENT, AppEvent::VanillaLoaded(result), Target::Global);
-        // 原版版本列表请求失败同样弹出异步任务错误窗，页面保持下载页。
+        // 原版版本列表请求失败同样弹出后台任务错误窗，页面保持下载页。
         match err {
             Some(err) => Err(err),
             None => Ok(()),
@@ -83,7 +82,7 @@ pub fn reload_current_loader(ctx: &mut EventCtx, data: &mut AppState) {
         let config = config.clone();
         let path = path.clone();
         let vanilla_name = vanilla_name.clone();
-        thread_main_report(async move {
+        thread_main_report(move || {
             // 与版本列表元数据请求相同：加载器列表只查询元数据，不创建下载进度。
             let downloader = Downloader::<()>::default()
                 .with_minecraft_path(&path)
@@ -91,7 +90,6 @@ pub fn reload_current_loader(ctx: &mut EventCtx, data: &mut AppState) {
                 .with_parallel_amount(config.download_parallel_amount);
             let result = match kind {
                 "fabric" => FabricDownloadExt::get_avaliable_loaders(&downloader, &vanilla_name)
-                    .await
                     .map(|list| {
                         list.into_iter()
                             .map(|x| (x.loader.version, !x.loader.stable))
@@ -99,7 +97,6 @@ pub fn reload_current_loader(ctx: &mut EventCtx, data: &mut AppState) {
                     })
                     .map_err(|err| format!("{err:?}")),
                 "quiltmc" => QuiltMCDownloadExt::get_avaliable_loaders(&downloader, &vanilla_name)
-                    .await
                     .map(|list| {
                         list.into_iter()
                             .map(|x| (x.loader.version, false))
@@ -107,7 +104,6 @@ pub fn reload_current_loader(ctx: &mut EventCtx, data: &mut AppState) {
                     })
                     .map_err(|err| format!("{err:?}")),
                 "forge" => ForgeDownloadExt::get_avaliable_installers(&downloader, &vanilla_name)
-                    .await
                     .map(|data| {
                         data.all_versions
                             .into_iter()
@@ -117,7 +113,6 @@ pub fn reload_current_loader(ctx: &mut EventCtx, data: &mut AppState) {
                     .map_err(|err| format!("{err:?}")),
                 "neoforge" => {
                     NeoForgeDownloadExt::get_avaliable_installers(&downloader, &vanilla_name)
-                        .await
                         .map(|data| {
                             data.all_versions
                                 .into_iter()
@@ -131,7 +126,6 @@ pub fn reload_current_loader(ctx: &mut EventCtx, data: &mut AppState) {
                 }
                 "optifine" => {
                     OptifineDownloadExt::get_avaliable_installers(&downloader, &vanilla_name)
-                        .await
                         .map(|list| {
                             list.into_iter()
                                 .map(|x| (format!("{} {}", x.version_type, x.patch), false))
@@ -141,7 +135,7 @@ pub fn reload_current_loader(ctx: &mut EventCtx, data: &mut AppState) {
                 }
                 _ => Ok(Vec::new()),
             };
-            // 加载器元数据查询失败只记 WARN 并保留“请求失败”行状态，不弹异步任务错误窗。
+            // 加载器元数据查询失败只记 WARN 并保留“请求失败”行状态，不弹后台任务错误窗。
             // 任务恒返回 Ok，不进入 `thread_main_report` 的错误弹窗分支——否则 GTK
             // 模态窗会遮挡下载页并吞掉点击（页面呈现为整块黑区）。
             let loader_name = match kind {
@@ -251,7 +245,7 @@ pub fn start_download(ctx: &mut EventCtx, data: &mut AppState, request: Download
         version_type,
     );
     data.starting_tip = Some(format!("正在下载游戏 {version_name}"));
-    thread_main_report(async move {
+    thread_main_report(move || {
         let downloader = Downloader::default()
             .with_minecraft_path(&path)
             .with_source(config.download_source.to_core())
@@ -274,7 +268,6 @@ pub fn start_download(ctx: &mut EventCtx, data: &mut AppState, request: Download
                 &request.neoforge,
                 &request.optifine,
             )
-            .await
             .map(|_| version_name)
             .map_err(|err| format!("{err:?}"));
         let err = result.as_ref().err().cloned();
@@ -283,7 +276,7 @@ pub fn start_download(ctx: &mut EventCtx, data: &mut AppState, request: Download
             AppEvent::DownloadFinished(result),
             Target::Global,
         );
-        // 安装失败在 GUI 侧弹回主页并显示原版异步任务错误窗，不再进入启动失败页。
+        // 安装失败在 GUI 侧弹回主页并显示原版后台任务错误窗，不再进入启动失败页。
         match err {
             Some(err) => Err(err),
             None => Ok(()),

@@ -7,7 +7,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use inner_future::stream::StreamExt;
 use serde::{
     de::{self, SeqAccess, Visitor},
     Deserialize, Deserializer, Serialize,
@@ -18,7 +17,7 @@ use crate::{
     package::PackageName,
     prelude::*,
     semver::MinecraftVersion,
-    utils::{get_full_path, NATIVE_ARCH_LAZY},
+    utils::{get_full_path, native_arch},
 };
 
 /// 一个针对系统的规则
@@ -30,7 +29,7 @@ pub struct OSRule {
     /// 系统版本号，依照平台而定
     #[serde(default)]
     pub version: String,
-    /// 系统架构，通常是直接和 [`crate::utils::NATIVE_ARCH_LAZY`] 比对即可
+    /// 系统架构，通常是直接和 [`crate::utils::native_arch`] 比对即可
     #[serde(default)]
     pub arch: String,
 }
@@ -72,7 +71,7 @@ impl Allowed for [ApplyRule] {
                         if !os.name.is_empty()
                             && os.name != crate::utils::TARGET_OS
                             && !os.arch.is_empty()
-                            && os.arch != NATIVE_ARCH_LAZY.as_ref()
+                            && os.arch != native_arch().as_ref()
                         {
                             continue;
                         } else {
@@ -84,7 +83,7 @@ impl Allowed for [ApplyRule] {
                 } else if rule.action == "allow" {
                     if let Some(os) = &rule.os {
                         if (!os.name.is_empty() && os.name != crate::utils::TARGET_OS)
-                            || (!os.arch.is_empty() && os.arch != NATIVE_ARCH_LAZY.as_ref())
+                            || (!os.arch.is_empty() && os.arch != native_arch().as_ref())
                         {
                             continue;
                         } else {
@@ -427,7 +426,7 @@ pub struct VersionInfo {
 
 impl VersionInfo {
     /// 根据 [`VersionInfo::version_base`] 和 [`VersionInfo::version`] 读取版本元数据信息
-    pub async fn load(&mut self) -> DynResult {
+    pub fn load(&mut self) -> DynResult {
         let version_base_path = Path::new(&self.version_base);
         if version_base_path.is_dir() {
             let jar_path = version_base_path
@@ -446,12 +445,12 @@ impl VersionInfo {
             } else {
                 if scl_config_path.is_file() {
                     // 加载启动器设置
-                    let data = inner_future::fs::read_to_string(scl_config_path).await?;
+                    let data = fs_err::read_to_string(scl_config_path)?;
                     let scl_config = serde_json::from_str(data.trim_start_matches('\u{feff}'))?; // 去掉可能存在的 BOM
                     self.scl_launch_config = Some(scl_config);
                 }
                 // 解析元文件，提取数据
-                let data = inner_future::fs::read_to_string(meta_path).await?;
+                let data = fs_err::read_to_string(meta_path)?;
                 let mut meta: VersionMeta =
                     serde_json::from_str(data.trim_start_matches('\u{feff}'))?; // 去掉可能存在的 BOM
                 if jar_path.is_file() {
@@ -479,16 +478,16 @@ impl VersionInfo {
     /// 删除版本文件夹，约等于删除整个版本
     ///
     /// 但是注意本操作不会清理 assets 文件夹和 libraries 文件夹的内容
-    pub async fn delete(self) {
+    pub fn delete(self) {
         let version_base_path = Path::new(&self.version_base);
         if version_base_path.is_dir() {
             let version_path = version_base_path.join(&self.version);
-            let _ = inner_future::fs::remove_dir_all(version_path).await;
+            let _ = fs_err::remove_dir_all(version_path);
         }
     }
 
     /// 重命名版本，如果目标版本名没有已有版本则会尝试重命名版本文件夹到该名称下
-    pub async fn rename_version(&mut self, new_version_name: &str) -> DynResult {
+    pub fn rename_version(&mut self, new_version_name: &str) -> DynResult {
         let version_base_path = Path::new(&self.version_base);
         if version_base_path.is_dir() {
             let version_path = version_base_path.join(&self.version);
@@ -501,12 +500,12 @@ impl VersionInfo {
                 anyhow::bail!("目标版本名称已存在")
             } else {
                 if version_jar_path.is_file() {
-                    inner_future::fs::rename(version_jar_path, new_version_jar_path).await?;
+                    fs_err::rename(version_jar_path, new_version_jar_path)?;
                 }
                 if version_json_path.is_file() {
-                    inner_future::fs::rename(version_json_path, new_version_json_path).await?
+                    fs_err::rename(version_json_path, new_version_json_path)?
                 };
-                inner_future::fs::rename(version_path, new_version_path).await?;
+                fs_err::rename(version_path, new_version_path)?;
                 self.version = new_version_name.to_owned();
                 Ok(())
             }
@@ -516,7 +515,7 @@ impl VersionInfo {
     }
 
     /// 保存元数据和独立版本设置
-    pub async fn save(&self) -> DynResult {
+    pub fn save(&self) -> DynResult {
         let version_base_path = Path::new(&self.version_base);
         if version_base_path.is_dir() {
             let meta_path = version_base_path
@@ -532,7 +531,7 @@ impl VersionInfo {
             } else {
                 // 解析元文件，提取数据
                 if let Some(meta) = &self.meta {
-                    let file = std::fs::OpenOptions::new()
+                    let file = fs_err::OpenOptions::new()
                         .truncate(true)
                         .write(true)
                         .open(meta_path);
@@ -548,7 +547,7 @@ impl VersionInfo {
                     }
                 }
                 if let Some(scl_config) = &self.scl_launch_config {
-                    let file = std::fs::OpenOptions::new()
+                    let file = fs_err::OpenOptions::new()
                         .truncate(true)
                         .create(true)
                         .write(true)
@@ -564,7 +563,7 @@ impl VersionInfo {
                         anyhow::bail!("无法打开 SCL 配置文件")
                     }
                 } else if scl_config_path.is_file() {
-                    inner_future::fs::remove_file(scl_config_path).await?;
+                    fs_err::remove_file(scl_config_path)?;
                 }
                 Ok(())
             }
@@ -631,14 +630,14 @@ impl VersionInfo {
     }
 
     /// 读取该版本下的所有模组信息
-    pub async fn get_mods(&self) -> DynResult<Vec<super::mods::Mod>> {
+    pub fn get_mods(&self) -> DynResult<Vec<super::mods::Mod>> {
         let mods_path = self.version_path().join("mods");
         if !mods_path.is_dir() {
             return Ok(vec![]);
         }
-        let mut files = inner_future::fs::read_dir(mods_path).await?;
         let mut results = vec![];
-        while let Some(file) = files.try_next().await? {
+        for file in fs_err::read_dir(mods_path)? {
+            let file = file?;
             if file.path().is_file()
                 && file
                     .path()
@@ -651,7 +650,7 @@ impl VersionInfo {
                     .map(|x| x.to_string_lossy().ends_with(".jar.disabled"))
                     == Some(true)
             {
-                results.push(super::mods::Mod::from_path(file.path()).await?);
+                results.push(super::mods::Mod::from_path(file.path())?);
             }
         }
         Ok(results)
@@ -660,10 +659,10 @@ impl VersionInfo {
     /// 根据版本实际情况获取最佳的最大内存用量，单位为 MB
     ///
     /// 代码参考自 <https://github.com/Hex-Dragon/PCL2/blob/f1310f18fda13b79b7a6189f02df15cd8300b28d/Plain%20Craft%20Launcher%202/Pages/PageSetup/PageSetupLaunch.xaml.vb#L327>
-    pub async fn get_automated_maxium_memory(&self) -> u64 {
+    pub fn get_automated_maxium_memory(&self) -> u64 {
         let mem_status = crate::utils::get_mem_status();
         let mut free = mem_status.free as i64;
-        let mods = self.get_mods().await.unwrap_or_default();
+        let mods = self.get_mods().unwrap_or_default();
         let (mem_min, mem_t1, mem_t2, mem_t3) = if !mods.is_empty() {
             (
                 400 + mods.len() as i64 * 7,
@@ -715,11 +714,10 @@ impl VersionInfo {
     /// 目前只是简单的扫一遍文件夹而已
     ///
     /// TODO: 做准确的解析过滤
-    pub async fn get_saves(&self) -> DynResult<Vec<WorldSave>> {
+    pub fn get_saves(&self) -> DynResult<Vec<WorldSave>> {
         let saves_path = self.version_path().join("saves");
         let mut result = Vec::new();
-        let mut files = inner_future::fs::read_dir(&saves_path).await?;
-        while let Some(_file) = files.try_next().await? {
+        for _file in fs_err::read_dir(&saves_path)? {
             result.push(WorldSave {})
         }
         Ok(result)
@@ -730,19 +728,17 @@ impl VersionInfo {
     /// 目前只是简单的扫一遍文件夹而已
     ///
     /// TODO: 做准确的解析过滤
-    pub async fn get_resources_packs(&self) -> DynResult<Vec<ResourcesPack>> {
+    pub fn get_resources_packs(&self) -> DynResult<Vec<ResourcesPack>> {
         let resourcepacks_path = self.version_path().join("resourcepacks");
         let texturepacks_path = self.version_path().join("texturepacks");
         let mut result = Vec::new();
         if resourcepacks_path.is_dir() {
-            let mut files = inner_future::fs::read_dir(&resourcepacks_path).await?;
-            while let Some(_file) = files.try_next().await? {
+            for _file in fs_err::read_dir(&resourcepacks_path)? {
                 result.push(ResourcesPack {})
             }
         }
         if texturepacks_path.is_dir() {
-            let mut files = inner_future::fs::read_dir(&texturepacks_path).await?;
-            while let Some(_file) = files.try_next().await? {
+            for _file in fs_err::read_dir(&texturepacks_path)? {
                 result.push(ResourcesPack {})
             }
         }

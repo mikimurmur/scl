@@ -1,14 +1,14 @@
 //! 原版游戏的下载模块
 
-use std::{borrow::Cow, collections::HashMap, path::Path, time::Duration};
+use std::{borrow::Cow, collections::HashMap, collections::HashSet, path::Path, time::Duration};
 
 use anyhow::Context;
-use inner_future::{fs::create_dir_all, io::AsyncWriteExt};
 use tracing::*;
 
 use super::{
-    structs::{AssetIndexes, VersionManifest},
-    timeout_after, DownloadSource, Downloader,
+    download_pool, run_parallel_tasks,
+    structs::{AssetIndexes, AssetItem, VersionManifest},
+    DownloadSource, Downloader,
 };
 
 /// 客户端 JAR 单源的有界等待时间（体积最大，留足慢速网络的余量）
@@ -22,30 +22,29 @@ const META_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 依次尝试各下载源，每个源限时等待，超时/失败后继续下一个源
 ///
-/// 直接复用 [`crate::http::download`] 的单源重试与临时文件语义，只是给
-/// 每个源套一层超时，避免不可达镜像让整个任务永久挂起（见
-/// [`super::timeout_after`] 的说明）。
-async fn download_with_sources(
+/// 直接复用 [`crate::http::download_verified_with_timeout`] 的单源重试、
+/// 临时文件与 SHA1/大小校验语义，避免坏内容被 rename 到目标路径。
+fn download_with_sources(
     uris: &[String],
     dest: &str,
+    sha1: Option<&str>,
+    size: Option<u64>,
     per_source: Duration,
 ) -> DynResult {
     let mut last_err = None;
     for uri in uris {
-        match timeout_after(
-            per_source,
-            crate::http::download(std::slice::from_ref(uri), dest, 0),
-        )
-        .await
-        {
-            Some(Ok(())) => return Ok(()),
-            Some(Err(err)) => {
+        match crate::http::download_verified_with_timeout(
+            std::slice::from_ref(uri),
+            dest,
+            0,
+            sha1,
+            size,
+            Some(per_source),
+        ) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
                 warn!("从 {} 下载 {} 失败：{:?}", uri, dest, err);
                 last_err = Some(err);
-            }
-            None => {
-                warn!("从 {} 下载 {} 超时，尝试下一个下载源", uri, dest);
-                last_err = Some(anyhow::anyhow!("下载 {} 超时", uri));
             }
         }
         // 重复的库条目会并发下载同一目标（1.5.2 的 jinput-platform 就有两条），
@@ -63,6 +62,45 @@ async fn download_with_sources(
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("没有可用的下载源")))
 }
+
+/// 判断本地文件是否满足期望的大小/哈希。
+///
+/// `verify_data=false` 时只校验大小（P0「修复默认只补缺失」）；只有显式启用
+/// 深度校验时才计算 SHA1。期望大小为 0 或 SHA1 为空表示跳过对应检查。
+fn local_file_matches(
+    path: &Path,
+    sha1: &str,
+    size: u64,
+    verify_data: bool,
+) -> DynResult<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    if size > 0 {
+        if fs_err::metadata(path)?.len() != size {
+            return Ok(false);
+        }
+    }
+    if verify_data && !sha1.is_empty() {
+        let mut file = fs_err::File::open(path)?;
+        return Ok(crate::utils::get_data_sha1(&mut file)?.eq_ignore_ascii_case(sha1));
+    }
+    Ok(true)
+}
+
+fn asset_object_path(objects_dir: &str, sha1: &str) -> String {
+    format!("{objects_dir}/{}/{sha1}", &sha1[..2])
+}
+
+fn asset_virtual_path(objects_dir: &str, virtual_id: &str, name: &str) -> String {
+    let assets_root = Path::new(objects_dir)
+        .parent()
+        .unwrap_or_else(|| Path::new(objects_dir));
+    format!(
+        "{}/virtual/{virtual_id}/{name}",
+        assets_root.to_string_lossy()
+    )
+}
 use crate::{
     download::VersionInfo,
     prelude::*,
@@ -73,40 +111,61 @@ use crate::{
 /// 一个用于下载安装原版的扩展特质，可以使用 [`crate::download::Downloader`] 来安装
 pub trait VanillaDownloadExt: Sync {
     /// 获取现在所有可下载版本
-    async fn get_avaliable_vanilla_versions(&self) -> DynResult<VersionManifest>;
+    fn get_avaliable_vanilla_versions(&self) -> DynResult<VersionManifest>;
 
     /// 下载原版客户端 JAR 文件
-    async fn download_vanilla_jar(&self, path: &str, save_path: &str, sha1: &str) -> DynResult;
+    fn download_vanilla_jar(
+        &self,
+        path: &str,
+        save_path: &str,
+        sha1: &str,
+        size: u64,
+    ) -> DynResult;
 
     /// 下载一个依赖库，并存放到指定位置
-    async fn download_library(&self, sha1: String, path: String, save_path: &str) -> DynResult;
+    fn download_library(
+        &self,
+        sha1: String,
+        path: String,
+        size: u64,
+        save_path: &str,
+    ) -> DynResult;
 
     /// 下载一组依赖库，安装位置由特质实现而定
-    async fn download_libraries(
-        &self,
-        libraries: &[Library],
-    ) -> DynResult<HashMap<String, Vec<String>>>;
+    fn download_libraries(&self, libraries: &[Library]) -> DynResult<HashMap<String, Vec<String>>>;
 
     /// 下载游戏资源索引
-    async fn download_asset_index(
+    fn download_asset_index(
         &self,
         name: &str,
         url: &str,
         save_path: &str,
     ) -> DynResult<AssetIndexes>;
 
-    /// 下载一个游戏素材，并存放到指定位置
-    async fn download_asset(
+    /// 下载一个游戏素材对象到 `assets/objects`。
+    ///
+    /// 旧版索引的 `assets/virtual/<id>/<name>` 副本由
+    /// [`VanillaDownloadExt::materialize_virtual_assets`] 统一生成。
+    fn download_asset(
         &self,
         sha1: &str,
         name: &str,
         save_path: &str,
-        is_pre: bool,
+        size: u64,
         r: Option<impl Reporter>,
     ) -> DynResult;
 
+    /// 把对象存储中的资源复制到 `assets/virtual/<id>/<name>`（1.6.x legacy / pre-1.6）
+    fn materialize_virtual_assets(
+        &self,
+        save_path: &str,
+        virtual_id: &str,
+        index: &AssetIndexes,
+        r: Option<impl Reporter>,
+    ) -> DynResult<usize>;
+
     /// 下载一个游戏版本
-    async fn download_vanilla(
+    fn download_vanilla(
         &self,
         version_name: &str,
         version_meta: &VersionMeta,
@@ -114,11 +173,11 @@ pub trait VanillaDownloadExt: Sync {
     ) -> DynResult;
 
     /// 安装一个游戏版本
-    async fn install_vanilla(&self, version_name: &str, version_info: &VersionInfo) -> DynResult;
+    fn install_vanilla(&self, version_name: &str, version_info: &VersionInfo) -> DynResult;
 }
 
 impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
-    async fn get_avaliable_vanilla_versions(&self) -> DynResult<VersionManifest> {
+    fn get_avaliable_vanilla_versions(&self) -> DynResult<VersionManifest> {
         let uri = match self.source {
             DownloadSource::Default => {
                 "https://piston-meta.mojang.com/mc/game/version_manifest.json"
@@ -126,46 +185,32 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             DownloadSource::BMCLAPI => {
                 "https://bmclapi2.bangbang93.com/mc/game/version_manifest.json"
             }
-            DownloadSource::MCBBS => "https://download.mcbbs.net/mc/game/version_manifest.json",
             _ => "https://piston-meta.mojang.com/mc/game/version_manifest.json",
         };
-        let res = match timeout_after(META_TIMEOUT, crate::http::retry_get_json(uri)).await {
-            Some(res) => res,
-            None => anyhow::bail!("获取可用原版列表超时：{uri}"),
-        }
-        .map_err(|e| anyhow::anyhow!("获取可用原版列表失败：{:?}", e))?;
-        Ok(res)
+        crate::http::retry_get_json_timeout(uri, Some(META_TIMEOUT))
+            .map_err(|e| anyhow::anyhow!("获取可用原版列表失败：{:?}", e))
     }
 
-    async fn download_vanilla_jar(&self, path: &str, save_path: &str, sha1: &str) -> DynResult {
-        let l = self.parallel_lock.acquire().await;
+    fn download_vanilla_jar(
+        &self,
+        path: &str,
+        save_path: &str,
+        sha1: &str,
+        size: u64,
+    ) -> DynResult {
         let r = self.reporter.sub();
         r.add_max_progress(1.);
         let name = &save_path[save_path.rfind(std::path::is_separator).unwrap_or(0) + 1..];
         r.set_message(format!("正在下载原版 {name}"));
-        if std::path::Path::new(&save_path).is_file() {
-            if self.verify_data {
-                let mut file = inner_future::fs::OpenOptions::new()
-                    .read(true)
-                    .open(&save_path)
-                    .await?;
-                let current_sha1 = crate::utils::get_data_sha1(&mut file).await?;
-                if sha1 == current_sha1 {
-                    r.add_progress(1.);
-                    return Ok(());
-                }
-            } else {
-                r.add_progress(1.);
-                return Ok(());
-            }
-        } else {
-            inner_future::fs::create_dir_all(
-                &save_path[..save_path
-                    .rfind(std::path::is_separator)
-                    .unwrap_or(save_path.len())],
-            )
-            .await?;
+        if local_file_matches(Path::new(save_path), sha1, size, self.verify_data)? {
+            r.add_progress(1.);
+            return Ok(());
         }
+        fs_err::create_dir_all(
+            &save_path[..save_path
+                .rfind(std::path::is_separator)
+                .unwrap_or(save_path.len())],
+        )?;
         let path = path.parse::<url::Url>()?;
         let uris = [
             match self.source {
@@ -175,50 +220,44 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
                 DownloadSource::BMCLAPI => {
                     format!("https://bmclapi2.bangbang93.com{}", path.path())
                 }
-                DownloadSource::MCBBS => format!("https://download.mcbbs.net{}", path.path()),
                 _ => format!("https://launcher.mojang.com{}", path.path()),
             },
             format!("https://bmclapi2.bangbang93.com{}", path.path()),
-            format!("https://download.mcbbs.net{}", path.path()),
             format!("https://launcher.mojang.com{}", path.path()),
         ];
-        download_with_sources(&uris, save_path, JAR_SOURCE_TIMEOUT)
-            .await
-            .map_err(|e| anyhow::anyhow!("下载原版游戏 Jar 失败：{:?}", e))?;
+        download_with_sources(
+            &uris,
+            save_path,
+            Some(sha1),
+            (size > 0).then_some(size),
+            JAR_SOURCE_TIMEOUT,
+        )
+        .map_err(|e| anyhow::anyhow!("下载原版游戏 Jar 失败：{:?}", e))?;
+        self.mark_file_repaired();
         r.add_progress(1.);
-        drop(l);
         Ok(())
     }
 
-    async fn download_library(&self, sha1: String, path: String, save_path: &str) -> DynResult {
-        let l = self.parallel_lock.acquire().await;
+    fn download_library(
+        &self,
+        sha1: String,
+        path: String,
+        size: u64,
+        save_path: &str,
+    ) -> DynResult {
         let r = self.reporter.sub();
         let full_path = format!("{save_path}/{path}");
         r.set_message(format!("正在下载原版库 {path}"));
         r.add_max_progress(1.);
-        if std::path::Path::new(&full_path).is_file() {
-            if self.verify_data {
-                let mut file = inner_future::fs::OpenOptions::new()
-                    .read(true)
-                    .open(&full_path)
-                    .await?;
-                let current_sha1 = crate::utils::get_data_sha1(&mut file).await?;
-                if sha1 == current_sha1 {
-                    r.add_progress(1.);
-                    return Ok(());
-                }
-            } else {
-                r.add_progress(1.);
-                return Ok(());
-            }
-        } else {
-            inner_future::fs::create_dir_all(
-                &full_path[..full_path
-                    .rfind(std::path::is_separator)
-                    .unwrap_or(full_path.len())],
-            )
-            .await?;
+        if local_file_matches(Path::new(&full_path), &sha1, size, self.verify_data)? {
+            r.add_progress(1.);
+            return Ok(());
         }
+        fs_err::create_dir_all(
+            &full_path[..full_path
+                .rfind(std::path::is_separator)
+                .unwrap_or(full_path.len())],
+        )?;
         let default_uris = [
             match self.source {
                 DownloadSource::Default => {
@@ -227,36 +266,50 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
                 DownloadSource::BMCLAPI => {
                     format!("https://bmclapi2.bangbang93.com/maven/{path}")
                 }
-                DownloadSource::MCBBS => format!("https://download.mcbbs.net/maven/{path}"),
                 _ => format!("https://libraries.minecraft.net/{path}"),
             },
             format!("https://bmclapi2.bangbang93.com/maven/{path}"),
-            format!("https://download.mcbbs.net/maven/{path}"),
             format!("https://libraries.minecraft.net/{path}"),
         ];
-        download_with_sources(&default_uris, &full_path, ASSET_SOURCE_TIMEOUT)
-            .await
-            .map_err(|e| anyhow::anyhow!("下载库 {} 失败：{:?}", path, e))?;
+        download_with_sources(
+            &default_uris,
+            &full_path,
+            (!sha1.is_empty()).then_some(sha1.as_str()),
+            (size > 0).then_some(size),
+            ASSET_SOURCE_TIMEOUT,
+        )
+        .map_err(|e| anyhow::anyhow!("下载库 {} 失败：{:?}", path, e))?;
+        self.mark_file_repaired();
         r.add_progress(1.);
-        drop(l);
         Ok(())
     }
 
-    async fn download_asset_index(
+    fn download_asset_index(
         &self,
         name: &str,
         url: &str,
         save_path: &str,
     ) -> DynResult<AssetIndexes> {
         let r = self.reporter.sub();
-        r.set_message(format!("正在下载原版资源索引 {name}"));
         let full_path = format!("{save_path}/indexes/{name}.json");
-        inner_future::fs::create_dir_all(
+        // 存在且可解析的索引直接复用，避免每次安装/修复都重新请求并覆盖写盘。
+        if let Ok(data) = fs_err::read(&full_path) {
+            match serde_json::from_slice::<AssetIndexes>(&data) {
+                Ok(index) => {
+                    debug!("复用已有资源索引 {name}");
+                    return Ok(index);
+                }
+                Err(err) => {
+                    warn!("资源索引 {name} 无法解析，重新下载：{err}");
+                }
+            }
+        }
+        r.set_message(format!("正在下载原版资源索引 {name}"));
+        fs_err::create_dir_all(
             &full_path[..full_path
                 .rfind(std::path::is_separator)
                 .unwrap_or(full_path.len())],
-        )
-        .await?;
+        )?;
         let p = {
             let url = url.parse::<url::Url>()?;
             let p = url.path();
@@ -270,72 +323,49 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
                 DownloadSource::BMCLAPI => {
                     format!("https://bmclapi2.bangbang93.com{p}")
                 }
-                DownloadSource::MCBBS => format!("https://download.mcbbs.net{p}"),
                 _ => format!("https://launchermeta.mojang.com{p}"),
             },
             format!("https://bmclapi2.bangbang93.com{p}"),
-            format!("https://download.mcbbs.net{p}"),
             format!("https://launchermeta.mojang.com{p}"),
         ];
         for uri in &uris {
-            let res = match timeout_after(META_TIMEOUT, crate::http::retry_get_bytes(uri)).await {
-                Some(res) => res,
-                None => {
-                    warn!("获取资源索引 {name} 超时：{uri}");
+            let res = match crate::http::retry_get_bytes_timeout(uri, Some(META_TIMEOUT)) {
+                Ok(res) => res,
+                Err(err) => {
+                    warn!("获取资源索引 {name} 失败：{uri}：{err:?}");
                     continue;
                 }
             };
-            if let Ok(res) = res {
-                inner_future::fs::write(full_path, &res).await?;
-                return Ok(serde_json::from_slice(&res)?);
+            if res.is_empty() {
+                warn!("资源索引 {name} 返回为空，尝试下一个链接");
+                continue;
             }
+            fs_err::write(&full_path, &res)?;
+            self.mark_file_repaired();
+            return Ok(serde_json::from_slice(&res)?);
         }
         anyhow::bail!("获取素材索引失败，已尝试的链接：{}", uris.join("\n"))
     }
-    async fn download_asset(
+    fn download_asset(
         &self,
         sha1: &str,
         name: &str,
         save_path: &str,
-        is_pre: bool,
+        size: u64,
         r: Option<impl Reporter>,
     ) -> DynResult {
-        let sub_hash = &sha1[..2];
-        let full_path = if is_pre {
-            format!("{save_path}/../virtual/pre-1.6/{name}")
-        } else {
-            format!("{save_path}/{sub_hash}/{sha1}")
-        };
-
+        let object_path = asset_object_path(save_path, sha1);
         r.set_message(format!("正在下载原版资源 {name}"));
-        let l = self.parallel_lock.acquire().await;
-        if if is_pre {
-            Path::new(&full_path).exists()
-        } else {
-            is_asset_exists(sha1, save_path)
-        } {
-            if self.verify_data {
-                let mut file = inner_future::fs::OpenOptions::new()
-                    .read(true)
-                    .open(&full_path)
-                    .await?;
-                let current_sha1 = crate::utils::get_data_sha1(&mut file).await?;
-                if sha1 == current_sha1 {
-                    r.add_progress(1.);
-                    return Ok(());
-                }
-            } else {
-                r.add_progress(1.);
-                return Ok(());
-            }
+        if local_file_matches(Path::new(&object_path), sha1, size, self.verify_data)? {
+            r.add_progress(1.);
+            return Ok(());
         }
-        inner_future::fs::create_dir_all(
-            &full_path[..full_path
+        fs_err::create_dir_all(
+            &object_path[..object_path
                 .rfind(std::path::is_separator)
-                .unwrap_or(full_path.len())],
-        )
-        .await?;
-
+                .unwrap_or(object_path.len())],
+        )?;
+        let sub_hash = &sha1[..2];
         let uris = [
             match self.source {
                 DownloadSource::Default => {
@@ -344,35 +374,72 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
                 DownloadSource::BMCLAPI => {
                     format!("https://bmclapi2.bangbang93.com/assets/{sub_hash}/{sha1}")
                 }
-                DownloadSource::MCBBS => {
-                    format!("https://download.mcbbs.net/assets/{sub_hash}/{sha1}")
-                }
                 _ => format!("https://resources.download.minecraft.net/{sub_hash}/{sha1}"),
             },
             format!("https://bmclapi2.bangbang93.com/assets/{sub_hash}/{sha1}"),
-            format!("https://download.mcbbs.net/assets/{sub_hash}/{sha1}"),
             format!("https://resources.download.minecraft.net/{sub_hash}/{sha1}"),
         ];
-        download_with_sources(&uris, &full_path, ASSET_SOURCE_TIMEOUT)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "下载资源文件失败 {:?}，已尝试的链接：{}",
-                    e,
-                    uris.join("\n")
-                )
-            })?;
+        download_with_sources(
+            &uris,
+            &object_path,
+            Some(sha1),
+            (size > 0).then_some(size),
+            ASSET_SOURCE_TIMEOUT,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "下载资源文件失败 {:?}，已尝试的链接：{}",
+                e,
+                uris.join("\n")
+            )
+        })?;
+        self.mark_file_repaired();
         r.add_progress(1.);
-        drop(l);
         Ok(())
     }
 
-    async fn download_libraries(
+    fn materialize_virtual_assets(
         &self,
-        libraries: &[Library],
-    ) -> DynResult<HashMap<String, Vec<String>>> {
+        save_path: &str,
+        virtual_id: &str,
+        index: &AssetIndexes,
+        r: Option<impl Reporter>,
+    ) -> DynResult<usize> {
+        let mut copied = 0;
+        r.set_message("正在映射旧版资源".into());
+        r.add_max_progress(index.objects.len() as f64);
+        for (name, obj) in &index.objects {
+            let object_path = asset_object_path(save_path, &obj.hash);
+            let virtual_path = asset_virtual_path(save_path, virtual_id, name);
+            let complete = local_file_matches(
+                Path::new(&virtual_path),
+                &obj.hash,
+                obj.size as u64,
+                self.verify_data,
+            )
+            .unwrap_or(false);
+            if !complete {
+                if !Path::new(&object_path).is_file() {
+                    warn!("资源对象缺失，无法映射到虚拟目录：{name} ({})", obj.hash);
+                    r.add_progress(1.);
+                    continue;
+                }
+                fs_err::create_dir_all(
+                    &virtual_path[..virtual_path
+                        .rfind(std::path::is_separator)
+                        .unwrap_or(virtual_path.len())],
+                )?;
+                fs_err::copy(&object_path, &virtual_path)?;
+                self.mark_file_repaired();
+                copied += 1;
+            }
+            r.add_progress(1.);
+        }
+        Ok(copied)
+    }
+
+    fn download_libraries(&self, libraries: &[Library]) -> DynResult<HashMap<String, Vec<String>>> {
         // Libraries
-        let mut _libraries_size = 0;
         let mut native_jars_mapping: HashMap<String, Vec<String>> =
             HashMap::with_capacity(libraries.len());
 
@@ -392,11 +459,13 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             Common {
                 sha1: Cow<'a, str>,
                 path: Cow<'a, str>,
+                size: u64,
             },
             Native {
                 platform: Cow<'a, str>,
                 sha1: Cow<'a, str>,
                 path: Cow<'a, str>,
+                size: u64,
             },
         }
 
@@ -415,6 +484,7 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
                             platform: target_platform.into(),
                             sha1: meta.sha1.as_str().into(),
                             path: meta.path.as_str().into(),
+                            size: meta.size as u64,
                         });
                     }
                 }
@@ -425,11 +495,13 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
                             platform: platform.into(),
                             sha1: artifact.sha1.as_str().into(),
                             path: artifact.path.as_str().into(),
+                            size: artifact.size as u64,
                         });
                     } else if lib.rules.is_allowed() {
                         tasks.push(LibraryTask::Common {
                             sha1: artifact.sha1.as_str().into(),
                             path: artifact.path.as_str().into(),
+                            size: artifact.size as u64,
                         });
                     }
                 }
@@ -441,6 +513,7 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
                 platform,
                 sha1,
                 path,
+                size: _,
             } = task
             {
                 debug!("原生库 {platform} {sha1} {path}");
@@ -457,29 +530,31 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             }
         }
 
-        let libraries_threads = tasks.into_iter().map(|x| match x {
-            LibraryTask::Common { sha1, path } => self.download_library(
-                sha1.to_string(),
-                path.to_string(),
-                self.minecraft_library_path.as_str(),
-            ),
-            LibraryTask::Native { sha1, path, .. } => self.download_library(
-                sha1.to_string(),
-                path.to_string(),
-                self.minecraft_library_path.as_str(),
-            ),
-        });
-
-        for v in futures::future::join_all(libraries_threads).await {
-            v?;
-        }
+        run_parallel_tasks(self.parallel_amount, &tasks, |task| -> DynResult {
+            match task {
+                LibraryTask::Common { sha1, path, size } => self.download_library(
+                    sha1.to_string(),
+                    path.to_string(),
+                    *size,
+                    self.minecraft_library_path.as_str(),
+                ),
+                LibraryTask::Native {
+                    sha1, path, size, ..
+                } => self.download_library(
+                    sha1.to_string(),
+                    path.to_string(),
+                    *size,
+                    self.minecraft_library_path.as_str(),
+                ),
+            }
+        })?;
 
         lr.remove_progress();
 
         Ok(native_jars_mapping)
     }
 
-    async fn download_vanilla(
+    fn download_vanilla(
         &self,
         version_name: &str,
         version_meta: &VersionMeta,
@@ -500,7 +575,6 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             .ok_or_else(|| anyhow::anyhow!("无法获取下载清单"))?
             .get("client")
             .ok_or_else(|| anyhow::anyhow!("无法获取客户端下载元数据"))?;
-        let main_jar_thread = self.download_vanilla_jar(&main_jar.url, &game_file, &main_jar.sha1);
 
         if is_repair {
             let lib_path = std::path::Path::new(self.minecraft_library_path.as_str());
@@ -510,121 +584,108 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
                 .join("1.0")
                 .join("log4j-patch");
             if !lib_path.is_dir() {
-                inner_future::fs::create_dir_all(&lib_path).await?;
+                fs_err::create_dir_all(&lib_path)?;
             }
             let log4j_path = lib_path.join("log4j-patch-agent-1.0.jar");
-            inner_future::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&log4j_path)
-                .await?
-                .write_all(crate::client::LOG4J_PATCH)
-                .await?;
+            // 修复只补缺失：补丁已存在时不重复写盘。
+            if !log4j_path.is_file() {
+                fs_err::write(&log4j_path, crate::client::LOG4J_PATCH)?;
+            }
         }
 
-        let libraries_thread = self.download_libraries(&version_meta.libraries);
-
-        let is_pre = &version_meta.asset_index.as_ref().unwrap().id == "pre-1.6";
-
-        // Assets
-        let assets_index = self
-            .download_asset_index(
-                &version_meta.asset_index.as_ref().unwrap().id,
-                &version_meta.asset_index.as_ref().unwrap().url,
-                self.minecraft_assets_path.as_str(),
-            )
-            .await?;
-
-        let mut assets_hashes = Vec::with_capacity(assets_index.objects.len());
+        let asset_index_meta = version_meta
+            .asset_index
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("版本元数据缺少资源索引"))?;
+        let assets_index = self.download_asset_index(
+            &asset_index_meta.id,
+            &asset_index_meta.url,
+            self.minecraft_assets_path.as_str(),
+        )?;
+        // legacy 索引（1.6.x）靠 virtual 标志；pre-1.6 靠 map_to_resources。
+        // 两者都需要在 assets/virtual/<索引 id> 下生成按文件名映射的副本。
+        let virtual_id: Option<&str> = if assets_index.is_virtual || assets_index.map_to_resources {
+            Some(asset_index_meta.id.as_str())
+        } else {
+            None
+        };
 
         let ar = r.sub();
-
         let minecraft_assets_objects_path = format!("{}/objects", self.minecraft_assets_path);
 
-        let amounts = assets_index
+        // 对象按 hash 去重下载；virtual/legacy 索引的全部文件名在下载完成后
+        // 由 materialize_virtual_assets 统一映射，避免同名 hash 丢名字，也避免
+        // 多个任务并发写同一个对象临时文件。
+        let mut seen_hashes = HashSet::new();
+        let assets_download_tasks: Vec<(&String, &AssetItem)> = assets_index
             .objects
             .iter()
-            .filter(|a| {
-                if assets_hashes.contains(&a.1.hash) {
-                    false
-                } else {
-                    assets_hashes.push(a.1.hash.to_owned());
-                    true
-                }
+            .filter(|(_, obj)| seen_hashes.insert(obj.hash.clone()))
+            .filter(|(_, obj)| {
+                !local_file_matches(
+                    Path::new(&asset_object_path(&minecraft_assets_objects_path, &obj.hash)),
+                    &obj.hash,
+                    obj.size as u64,
+                    self.verify_data,
+                )
+                .unwrap_or(false)
             })
-            .filter(|(path, obj)| {
-                if is_pre {
-                    !Path::new(&minecraft_assets_objects_path)
-                        .parent()
-                        .unwrap()
-                        .join("virtual")
-                        .join("pre-1.6")
-                        .join(path)
-                        .exists()
-                } else {
-                    !is_asset_exists(&obj.hash, &minecraft_assets_objects_path)
-                }
-            })
-            .count();
-
-        assets_hashes.clear();
-
-        let assets_download_tasks = assets_index
-            .objects
-            .iter()
-            .filter(|a| {
-                if assets_hashes.contains(&a.1.hash) {
-                    false
-                } else {
-                    assets_hashes.push(a.1.hash.to_owned());
-                    true
-                }
-            })
-            .filter(|(path, obj)| {
-                if is_pre {
-                    !Path::new(&minecraft_assets_objects_path)
-                        .parent()
-                        .unwrap()
-                        .join("virtual")
-                        .join("pre-1.6")
-                        .join(path)
-                        .exists()
-                } else {
-                    !is_asset_exists(&obj.hash, &minecraft_assets_objects_path)
-                }
-            });
+            .collect();
+        let amounts = assets_download_tasks.len();
 
         ar.set_message("下载资源文件".into());
         ar.add_max_progress(amounts as _);
 
-        let assets_index_objects = assets_download_tasks.map(|(rpath, obj)| {
-            self.download_asset(
-                &obj.hash,
-                rpath,
-                &minecraft_assets_objects_path,
-                is_pre,
-                ar.sub(),
-            )
-        });
+        let native_jars = download_pool().install(|| -> DynResult<_> {
+            let assets_result = run_parallel_tasks(
+                self.parallel_amount,
+                &assets_download_tasks,
+                |(name, obj)| -> DynResult {
+                    self.download_asset(
+                        &obj.hash,
+                        name,
+                        &minecraft_assets_objects_path,
+                        obj.size as u64,
+                        ar.sub(),
+                    )
+                },
+            );
+            if is_repair {
+                let libraries_result = self.download_libraries(&version_meta.libraries);
+                assets_result?;
+                libraries_result
+            } else {
+                let ((jar_result, libraries_result), assets_result) = rayon::join(
+                    || {
+                        rayon::join(
+                            || {
+                                self.download_vanilla_jar(
+                                    &main_jar.url,
+                                    &game_file,
+                                    &main_jar.sha1,
+                                    main_jar.size as u64,
+                                )
+                            },
+                            || self.download_libraries(&version_meta.libraries),
+                        )
+                    },
+                    || assets_result,
+                );
+                jar_result?;
+                assets_result?;
+                libraries_result
+            }
+        })?;
 
-        // Wait all threads
-        let native_jars = if is_repair {
-            futures::future::join(
-                libraries_thread,
-                futures::future::join_all(assets_index_objects),
-            )
-            .await
-            .0?
-        } else {
-            futures::future::join3(
-                main_jar_thread,
-                libraries_thread,
-                futures::future::join_all(assets_index_objects),
-            )
-            .await
-            .1?
-        };
+        // 1.6.x legacy / pre-1.6：对象下载完成后，为索引中的每个文件名生成虚拟副本。
+        if let Some(virtual_id) = virtual_id {
+            self.materialize_virtual_assets(
+                &minecraft_assets_objects_path,
+                virtual_id,
+                &assets_index,
+                ar.sub(),
+            )?;
+        }
 
         let native_dir = format!(
             "{}/{}/natives",
@@ -637,7 +698,10 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
         for (platform, items) in native_jars.iter() {
             let native_dir = format!("{native_dir}/{platform}");
             for item in items {
-                unzip_natives(item, &native_dir).await?;
+                // 修复只补缺失：目标目录里已有全部 native 文件时跳过解压。
+                if natives_need_extract(item, &native_dir) {
+                    unzip_natives(item, &native_dir)?;
+                }
             }
             nr.add_progress(1.);
         }
@@ -647,20 +711,19 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
         Ok(())
     }
 
-    async fn install_vanilla(&self, version_name: &str, version_info: &VersionInfo) -> DynResult {
+    fn install_vanilla(&self, version_name: &str, version_info: &VersionInfo) -> DynResult {
         self.reporter.set_max_progress(4.);
         self.reporter
             .set_message(format!("正在获取版本元数据 {version_name}"));
 
-        create_dir_all(format!("{}/indexes", self.minecraft_assets_path)).await?;
-        create_dir_all(format!("{}/objects", self.minecraft_assets_path)).await?;
-        create_dir_all(self.minecraft_library_path.as_str()).await?;
-        create_dir_all(format!(
+        fs_err::create_dir_all(format!("{}/indexes", self.minecraft_assets_path))?;
+        fs_err::create_dir_all(format!("{}/objects", self.minecraft_assets_path))?;
+        fs_err::create_dir_all(self.minecraft_library_path.as_str())?;
+        fs_err::create_dir_all(format!(
             "{}/{}",
             self.minecraft_version_path.as_str(),
             version_name
-        ))
-        .await?;
+        ))?;
 
         let version_file = format!(
             "{}/{}/{}.json",
@@ -674,16 +737,12 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
         let meta_uri = match self.source {
             DownloadSource::Default => format!("https://launchermeta.mojang.com{url_path}"),
             DownloadSource::BMCLAPI => format!("https://bmclapi2.bangbang93.com{url_path}"),
-            DownloadSource::MCBBS => format!("https://download.mcbbs.net{url_path}"),
             _ => format!("https://launchermeta.mojang.com{url_path}"),
         };
-        let res = match timeout_after(META_TIMEOUT, crate::http::retry_get_bytes(&meta_uri)).await {
-            Some(res) => res,
-            None => anyhow::bail!("下载版本元数据超时：{meta_uri}"),
-        }
-        .map_err(|e| anyhow::anyhow!("下载版本元数据失败：{:?}", e))?;
+        let res = crate::http::retry_get_bytes_timeout(&meta_uri, Some(META_TIMEOUT))
+            .map_err(|e| anyhow::anyhow!("下载版本元数据失败：{:?}", e))?;
 
-        inner_future::fs::write(&version_file, &res).await?;
+        fs_err::write(&version_file, &res)?;
 
         self.reporter
             .set_message(format!("正在下载游戏文件 {version_name}"));
@@ -692,57 +751,116 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
 
         version_meta.fix_libraries();
 
-        self.download_vanilla(version_name, &version_meta, false)
-            .await?;
+        self.download_vanilla(version_name, &version_meta, false)?;
 
         Ok(())
     }
 }
 
-fn is_asset_exists(hash: &str, save_path: &str) -> bool {
-    let sub_hash = &hash[..2];
-    let full_path = format!("{save_path}/{sub_hash}/{hash}");
-    std::path::Path::new(&full_path).is_file()
-}
-
 const NATIVE_EXTS: &[&str] = &["dll", "so", "dylib", "jnilib"];
+
+/// 判断 native 压缩包中是否还有未落盘的文件。
+///
+/// 打开/解析失败时返回 `true`，交给 [`unzip_natives`] 给出具体错误。
+fn natives_need_extract(unzip_file: &str, unzip_dir: &str) -> bool {
+    let Ok(file) = fs_err::File::open(unzip_file) else {
+        return true;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return true;
+    };
+    let dir = Path::new(unzip_dir);
+    for i in 0..archive.len() {
+        let Ok(file) = archive.by_index(i) else {
+            return true;
+        };
+        let Some(p) = file
+            .enclosed_name()
+            .and_then(|p| p.file_name().map(|name| name.to_owned()))
+        else {
+            continue;
+        };
+        let Some(ext) = Path::new(&p).extension() else {
+            continue;
+        };
+        if !NATIVE_EXTS.contains(&ext.to_str().unwrap_or_default()) {
+            continue;
+        }
+        if !dir.join(&p).is_file() {
+            return true;
+        }
+    }
+    false
+}
 
 /// 解压指定 ZIP 压缩文件的内容到指定文件夹
 ///
 /// 如果文件夹不存在则创建
-pub async fn unzip_natives(unzip_file: &str, unzip_dir: &str) -> DynResult {
-    let unzip_file = unzip_file.to_owned();
-    let unzip_dir = unzip_dir.to_owned();
-    inner_future::unblock(move || -> DynResult {
-        let file = std::fs::File::open(&unzip_file)?;
-        let dir = std::path::PathBuf::from(unzip_dir);
-        let mut archive = zip::ZipArchive::new(file)
-            .with_context(|| format!("解压原生库 {unzip_file} 时发生错误"))?;
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            let p = match file.enclosed_name().and_then(|p| p.file_name()) {
-                Some(p) => p.to_owned(),
-                None => continue,
-            };
-            if let Some(ext) = Path::new(&p).extension() {
-                if !NATIVE_EXTS.contains(&ext.to_str().unwrap_or_default()) {
-                    continue;
-                }
-            } else {
+pub fn unzip_natives(unzip_file: &str, unzip_dir: &str) -> DynResult {
+    let file = fs_err::File::open(unzip_file)?;
+    let dir = std::path::PathBuf::from(unzip_dir);
+    let mut archive = zip::ZipArchive::new(file)
+        .with_context(|| format!("解压原生库 {unzip_file} 时发生错误"))?;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        // zip 2.x 的 `enclosed_name` 返回拥有所有权的 PathBuf，这里直接取出文件名。
+        let p = match file
+            .enclosed_name()
+            .and_then(|p| p.file_name().map(|name| name.to_owned()))
+        {
+            Some(p) => p.to_owned(),
+            None => continue,
+        };
+        if let Some(ext) = Path::new(&p).extension() {
+            if !NATIVE_EXTS.contains(&ext.to_str().unwrap_or_default()) {
                 continue;
             }
-            let save_path = dir.join(&p);
-            let save_dir = save_path.parent().unwrap();
-            let _ = std::fs::create_dir_all(save_dir);
-            debug!(
-                "解压原生库 {} 到 {}",
-                p.to_string_lossy(),
-                save_path.display()
-            );
-            let mut output = std::fs::File::create(save_path)?;
-            std::io::copy(&mut file, &mut output)?;
+        } else {
+            continue;
         }
-        Ok(())
-    })
-    .await
+        let save_path = dir.join(&p);
+        let save_dir = save_path.parent().unwrap();
+        let _ = fs_err::create_dir_all(save_dir);
+        debug!(
+            "解压原生库 {} 到 {}",
+            p.to_string_lossy(),
+            save_path.display()
+        );
+        let mut output = fs_err::File::create(save_path)?;
+        std::io::copy(&mut file, &mut output)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 索引文件存在且可解析时必须复用，不能发起网络请求。
+    #[test]
+    fn reuses_existing_asset_index() {
+        let dir = std::env::temp_dir().join(format!(
+            "scl_asset_index_reuse_{}",
+            std::process::id()
+        ));
+        let _ = fs_err::remove_dir_all(&dir);
+        fs_err::create_dir_all(dir.join("assets").join("indexes")).expect("创建索引目录");
+        fs_err::write(
+            dir.join("assets").join("indexes").join("legacy.json"),
+            br#"{"virtual":true,"objects":{}}"#,
+        )
+        .expect("写入索引");
+        let downloader: Downloader<()> = Downloader::default().with_minecraft_path(&dir);
+        let assets_path = dir.join("assets").to_string_lossy().to_string();
+        let index = downloader
+            .download_asset_index(
+                "legacy",
+                "http://127.0.0.1:1/unreachable",
+                &assets_path,
+            )
+            .expect("已存在的索引应直接复用");
+        assert!(index.is_virtual);
+        assert!(index.objects.is_empty());
+        let _ = fs_err::remove_dir_all(&dir);
+    }
 }

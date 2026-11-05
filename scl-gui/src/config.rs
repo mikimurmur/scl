@@ -3,11 +3,13 @@
 //! 配置文件保存在启动器工作目录下的 `.scl.json` 中。所有字段都提供了默认值，
 //! 因此旧版本的配置文件也可以被正常读取。
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+};
 
 use anyhow::Context;
 use druid::{Color, Data, Lens};
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -529,8 +531,11 @@ impl VersionIndependentMethod {
 }
 
 /// 保存配置文件的互斥锁
-pub static SAVE_CONFIG_MUTEX: Lazy<smol::lock::Mutex<()>> =
-    Lazy::new(|| smol::lock::Mutex::new(()));
+static SAVE_CONFIG_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn save_config_mutex() -> &'static Mutex<()> {
+    SAVE_CONFIG_MUTEX.get_or_init(|| Mutex::new(()))
+}
 
 /// 获取配置文件路径
 pub fn config_path() -> PathBuf {
@@ -552,7 +557,7 @@ fn auth_data_path() -> Option<PathBuf> {
 /// 同步读取配置文件
 pub fn get_config_sync() -> anyhow::Result<Config> {
     let path = config_path();
-    let data = match std::fs::read_to_string(&path) {
+    let data = match fs_err::read_to_string(&path) {
         Ok(data) => data,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Config::default());
@@ -577,7 +582,7 @@ pub fn load_auth_data() -> Option<AccountData> {
 
 /// 从指定路径读取账户数据（供测试与 [`load_auth_data`] 复用）
 fn load_auth_data_from(path: &Path) -> Option<AccountData> {
-    let data = match std::fs::read_to_string(path) {
+    let data = match fs_err::read_to_string(path) {
         Ok(data) => data,
         Err(err) => {
             tracing::error!("读取账户配置信息 {} 失败：{err}", path.display());
@@ -603,29 +608,10 @@ pub fn apply_auth_override(config: &mut Config, auth: Option<AccountData>) {
     }
 }
 
-/// 把账户数据写入指定目录下的 `auth_data.json`（紧凑 JSON，异步版本）
-async fn save_auth_data_in_dir_async(dir: &Path, accounts: &AccountData) -> anyhow::Result<()> {
-    if !smol::fs::metadata(dir)
-        .await
-        .map(|meta| meta.is_dir())
-        .unwrap_or(false)
-    {
-        smol::fs::create_dir_all(dir)
-            .await
-            .with_context(|| format!("创建目录 {} 失败", dir.display()))?;
-    }
-    let path = dir.join("auth_data.json");
-    let data = serde_json::to_vec(accounts)?;
-    crate::utils::prelude::write_file_safe_async(&path, data)
-        .await
-        .context("无法写入账户配置信息")?;
-    Ok(())
-}
-
-/// 把账户数据写入指定目录下的 `auth_data.json`（紧凑 JSON，同步版本）
+/// 把账户数据写入指定目录下的 `auth_data.json`（紧凑 JSON）
 fn save_auth_data_in_dir_sync(dir: &Path, accounts: &AccountData) -> anyhow::Result<()> {
     if !dir.is_dir() {
-        std::fs::create_dir_all(dir).with_context(|| format!("创建目录 {} 失败", dir.display()))?;
+        fs_err::create_dir_all(dir).with_context(|| format!("创建目录 {} 失败", dir.display()))?;
     }
     let path = dir.join("auth_data.json");
     let data = serde_json::to_vec(accounts)?;
@@ -634,16 +620,6 @@ fn save_auth_data_in_dir_sync(dir: &Path, accounts: &AccountData) -> anyhow::Res
 }
 
 /// 按官方双轨存储保存账户数据到 `~/.scl/auth_data.json`
-async fn save_auth_data_async(accounts: &AccountData) -> anyhow::Result<()> {
-    match auth_data_dir() {
-        Some(dir) => save_auth_data_in_dir_async(&dir, accounts).await,
-        None => {
-            tracing::warn!("警告：用户不存在用户文件夹！将无法保存账户令牌！");
-            Ok(())
-        }
-    }
-}
-
 fn save_auth_data_sync(accounts: &AccountData) -> anyhow::Result<()> {
     match auth_data_dir() {
         Some(dir) => save_auth_data_in_dir_sync(&dir, accounts),
@@ -654,29 +630,30 @@ fn save_auth_data_sync(accounts: &AccountData) -> anyhow::Result<()> {
     }
 }
 
-/// 异步保存配置文件
+/// 保存配置文件
 ///
-/// 顺序：加锁 → 日志「正在异步保存配置文件」→
+/// 顺序：加锁 → 日志「正在后台保存配置文件」→
 /// 先写 `~/.scl/auth_data.json`（紧凑）→ 再写 `./.scl.json`（pretty）→
-/// 日志「配置文件异步保存完成」。
-pub async fn save_config(config: &Config) -> anyhow::Result<()> {
-    tracing::info!("正在异步保存配置文件");
-    let _guard = SAVE_CONFIG_MUTEX.lock().await;
-    save_auth_data_async(&config.accounts_data).await?;
+/// 日志「配置文件后台保存完成」。
+pub fn save_config(config: &Config) -> anyhow::Result<()> {
+    tracing::info!("正在后台保存配置文件");
+    let _guard = save_config_mutex()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    save_auth_data_sync(&config.accounts_data)?;
     let data = serde_json::to_vec_pretty(config)?;
     let path = config_path();
-    crate::utils::prelude::write_file_safe_async(&path, data)
-        .await
+    crate::utils::prelude::write_file_safe_sync(&path, data)
         .with_context(|| format!("写入配置文件 {} 失败", path.display()))?;
-    tracing::info!("配置文件异步保存完成");
+    tracing::info!("配置文件后台保存完成");
     Ok(())
 }
 
 /// 同步保存配置文件
 pub fn save_config_sync(config: &Config) -> anyhow::Result<()> {
-    // async-lock 2.8 没有阻塞版 lock；关窗路径运行在 UI 线程（无异步运行时），
-    // 用 block_on 等锁不会死锁：后台执行器线程独立推进正在持锁的异步保存。
-    let _guard = smol::block_on(SAVE_CONFIG_MUTEX.lock());
+    let _guard = save_config_mutex()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     save_auth_data_sync(&config.accounts_data)?;
     let data = serde_json::to_vec_pretty(config)?;
     save_config_data_sync(&config_path(), &data)
@@ -1147,12 +1124,12 @@ mod sync_save_tests {
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        fs_err::create_dir_all(&dir).expect("创建临时目录");
         dir
     }
 
     fn temp_residue(dir: &std::path::Path) -> Vec<String> {
-        std::fs::read_dir(dir)
+        fs_err::read_dir(dir)
             .expect("读取临时目录")
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
@@ -1183,10 +1160,10 @@ mod sync_save_tests {
             temp_residue(&dir).is_empty(),
             "首次保存后不应有临时文件残留"
         );
-        let disk = std::fs::read_to_string(&path).expect("读取配置");
+        let disk = fs_err::read_to_string(&path).expect("读取配置");
         let loaded: Config = serde_json::from_str(&disk).expect("反序列化配置");
         assert_eq!(loaded, config);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs_err::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1194,7 +1171,7 @@ mod sync_save_tests {
         let dir = test_dir("roundtrip");
         let path = dir.join(".scl.json");
         // 预置旧内容，确认 rename 是完整替换而不是追加。
-        std::fs::write(&path, "old").expect("写入旧配置");
+        fs_err::write(&path, "old").expect("写入旧配置");
 
         let config = sample_config("round-trip", 4321);
         let data = serde_json::to_vec_pretty(&config).expect("序列化配置");
@@ -1205,10 +1182,10 @@ mod sync_save_tests {
             temp_residue(&dir).is_empty(),
             "覆盖保存后不应有临时文件残留"
         );
-        let disk = std::fs::read_to_string(&path).expect("读取配置");
+        let disk = fs_err::read_to_string(&path).expect("读取配置");
         let loaded: Config = serde_json::from_str(&disk).expect("反序列化配置");
         assert_eq!(loaded, config);
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = fs_err::remove_dir_all(&dir);
     }
 }
 
@@ -1449,32 +1426,26 @@ mod auth_data_tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// 异步保存同样双轨落盘。
+    /// 双轨保存同样写入 auth_data.json 与 .scl.json。
     #[test]
-    fn async_save_writes_both_files() {
-        let dir = test_dir("async-dual");
+    fn save_writes_both_files() {
+        let dir = test_dir("dual-save");
         let auth_dir = dir.join("home").join(".scl");
         let scl_path = dir.join(".scl.json");
 
         let config = Config {
-            accounts_data: offline_account("AsyncSave"),
+            accounts_data: offline_account("BackgroundSave"),
             ..Config::default()
         };
         let data = serde_json::to_vec_pretty(&config).expect("序列化配置");
 
-        smol::block_on(async {
-            save_auth_data_in_dir_async(&auth_dir, &config.accounts_data)
-                .await
-                .expect("异步写入账户文件");
-            crate::utils::prelude::write_file_safe_async(&scl_path, data)
-                .await
-                .expect("异步写入配置文件");
-        });
+        save_auth_data_in_dir_sync(&auth_dir, &config.accounts_data).expect("写入账户文件");
+        crate::utils::prelude::write_file_safe_sync(&scl_path, data).expect("写入配置文件");
 
         let auth_disk =
             fs::read_to_string(auth_dir.join("auth_data.json")).expect("auth 文件应被创建");
-        assert!(auth_disk.contains(r#""player_name":"AsyncSave""#));
-        assert!(!auth_disk.contains('\n'), "异步写入也应为紧凑格式");
+        assert!(auth_disk.contains(r#""player_name":"BackgroundSave""#));
+        assert!(!auth_disk.contains('\n'), "写入也应为紧凑格式");
         assert!(scl_path.exists());
         let _ = fs::remove_dir_all(dir);
     }

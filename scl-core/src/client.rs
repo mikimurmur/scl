@@ -6,7 +6,7 @@ use std::{
     path::Path,
 };
 
-use inner_future::process::{Child, Command};
+use std::process::{Child, Command};
 
 use super::{
     auth::structs::AuthMethod,
@@ -61,6 +61,42 @@ pub struct Client {
     pub process: Option<Child>,
 }
 
+/// 读取资源索引的 virtual / map_to_resources 标志。
+///
+/// 索引文件缺失或损坏时，回退到已知的旧版本 id（1.6.x `legacy` 与 `pre-1.6`），
+/// 避免启动时因为缺少索引文件把 legacy 资源指向错误目录。
+fn asset_index_flags(assets_path: &Path, id: &str) -> (bool, bool) {
+    let index_path = assets_path.join("indexes").join(format!("{id}.json"));
+    if let Ok(data) = fs_err::read(&index_path) {
+        if let Ok(index) = serde_json::from_slice::<crate::download::structs::AssetIndexes>(&data) {
+            return (
+                index.is_virtual || index.map_to_resources,
+                index.map_to_resources,
+            );
+        }
+    }
+    (matches!(id, "legacy" | "pre-1.6"), id == "pre-1.6")
+}
+
+/// 递归复制目录内容到目标目录，已存在的目标文件跳过。
+///
+/// 对应原 `fs_extra::dir::copy` 的 `skip_exist(true).content_only(true)` 语义，
+/// 用于把 pre-1.6 的虚拟资源映射到游戏目录下的 `resources`。
+fn copy_dir_content_skip_exist(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs_err::create_dir_all(to)?;
+    for entry in fs_err::read_dir(from)? {
+        let entry = entry?;
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_content_skip_exist(&source, &target)?;
+        } else if !target.exists() {
+            fs_err::copy(&source, &target)?;
+        }
+    }
+    Ok(())
+}
+
 fn get_game_directory(cfg: &ClientConfig) -> String {
     let version_base = std::path::Path::new(&cfg.version_info.version_base);
     let version_dir = version_base.join(&cfg.version_info.version);
@@ -82,7 +118,7 @@ fn get_game_directory(cfg: &ClientConfig) -> String {
     }
 }
 
-async fn parse_inheritsed_meta(cfg: &ClientConfig) -> VersionMeta {
+fn parse_inheritsed_meta(cfg: &ClientConfig) -> VersionMeta {
     let meta = cfg.version_info.meta.as_ref().unwrap();
     let inherits_from = if !meta.inherits_from.is_empty() {
         meta.inherits_from.as_str()
@@ -100,7 +136,7 @@ async fn parse_inheritsed_meta(cfg: &ClientConfig) -> VersionMeta {
             version_base: cfg.version_info.version_base.to_owned(),
             ..Default::default()
         };
-        if base_info.load().await.is_ok() {
+        if base_info.load().is_ok() {
             if let Some(base) = &mut base_info.meta {
                 let mut base = base.to_owned();
                 base += meta;
@@ -118,7 +154,7 @@ impl Client {
     /// 根据传入的启动客户端版本设定创建一个客户端
     ///
     /// 这将会检查元数据，并组合出启动参数，之后可以使用 [`Client::launch`] 启动游戏
-    pub async fn new(mut cfg: ClientConfig) -> DynResult<Self> {
+    pub fn new(mut cfg: ClientConfig) -> DynResult<Self> {
         if cfg.version_info.meta.is_none() {
             anyhow::bail!("VersionInfo must have meta loaded");
         }
@@ -126,7 +162,7 @@ impl Client {
         let mut args = Vec::<String>::with_capacity(64);
 
         // 检查是否继承版本
-        let meta = parse_inheritsed_meta(&cfg).await;
+        let meta = parse_inheritsed_meta(&cfg);
 
         cfg.version_info.meta = Some(meta.to_owned());
 
@@ -134,7 +170,7 @@ impl Client {
             if scl_config.java_path.is_empty() {
                 cfg.java_runtime.to_owned()
             } else {
-                JavaRuntime::from_java_path(OsString::from(&scl_config.java_path)).await?
+                JavaRuntime::from_java_path(OsString::from(&scl_config.java_path))?
             }
         } else {
             cfg.java_runtime.to_owned()
@@ -185,14 +221,13 @@ impl Client {
                         sep = std::path::MAIN_SEPARATOR,
                     )
                 };
-                let mut lib_path = if let Some(ds) = &lib.downloads {
+                let lib_path = if let Some(ds) = &lib.downloads {
                     if let Some(d) = &ds.artifact {
                         // 使用 artifact.path
                         format!(
                             "{}{sep}{}",
                             lib_base_path,
-                            d.path
-                                .replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR),
+                            d.path.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR),
                             sep = std::path::MAIN_SEPARATOR
                         )
                     } else {
@@ -212,9 +247,11 @@ impl Client {
                     lib_args
                         .into_iter()
                         .map(|x| x.1)
-                        .chain(meta.main_jars.iter().map(|a| {
-                            a.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR)
-                        }))
+                        .chain(
+                            meta.main_jars
+                                .iter()
+                                .map(|a| a.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR)),
+                        )
                         .collect()
                 };
 
@@ -270,38 +307,31 @@ impl Client {
         variables.insert("${assets_root}", {
             let assets_path = std::path::Path::new(&cfg.version_info.version_base);
             let assets_path = assets_path.parent().unwrap().join("assets");
-            if cfg
+            let asset_index = cfg
                 .version_info
                 .meta
                 .as_ref()
-                .map(|x| {
-                    x.asset_index
-                        .as_ref()
-                        .map(|x| &x.id == "pre-1.6")
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default()
-            {
-                // 使用旧版 Minecraft 资源文件结构的版本需要将资源文件复制到 gameDir/resources 文件夹下方可正确读取游戏资源
+                .and_then(|meta| meta.asset_index.as_ref());
+            let (is_virtual, map_to_resources) = asset_index
+                .map(|index| asset_index_flags(&assets_path, &index.id))
+                .unwrap_or((false, false));
+            let assets_root = match asset_index {
+                Some(index) if is_virtual => assets_path.join("virtual").join(&index.id),
+                _ => assets_path,
+            };
+            if map_to_resources {
+                // 使用旧版 Minecraft 资源文件结构的版本需要将资源文件复制到
+                // gameDir/resources 文件夹下方可正确读取游戏资源。
                 let game_dir = get_game_directory(&cfg);
                 let resources_path = Path::new(&game_dir).join("resources");
-                let assets_path = assets_path.join("virtual").join("pre-1.6");
                 tracing::trace!(
                     "正在映射 {} 至 {}",
-                    assets_path.to_string_lossy(),
+                    assets_root.to_string_lossy(),
                     resources_path.to_string_lossy()
                 );
-                let _ = fs_extra::dir::copy(
-                    &assets_path,
-                    &resources_path,
-                    &fs_extra::dir::CopyOptions::new()
-                        .skip_exist(true)
-                        .content_only(true),
-                );
-                get_full_path(assets_path)
-            } else {
-                get_full_path(assets_path)
+                let _ = copy_dir_content_skip_exist(&assets_root, &resources_path);
             }
+            get_full_path(assets_root)
         });
         variables.insert(
             "${game_assets}",
@@ -373,7 +403,7 @@ impl Client {
         }
         if let Some(scl_config) = &cfg.version_info.scl_launch_config {
             if !scl_config.jvm_args.trim().is_empty() {
-                if let Ok(jvm_args) = shell_words::split(&scl_config.jvm_args) {
+                if let Some(jvm_args) = crate::utils::split_command_line(&scl_config.jvm_args) {
                     for arg in jvm_args {
                         args.push(arg);
                     }
@@ -498,7 +528,7 @@ impl Client {
         }
         if let Some(scl_config) = &cfg.version_info.scl_launch_config {
             if !scl_config.game_args.trim().is_empty() {
-                if let Ok(game_args) = shell_words::split(&scl_config.game_args) {
+                if let Some(game_args) = crate::utils::split_command_line(&scl_config.game_args) {
                     for arg in game_args {
                         args.push(arg);
                     }
@@ -619,10 +649,10 @@ impl Client {
     }
 
     /// 启动游戏，并返回进程 ID
-    pub async fn launch(&mut self) -> DynResult<u32> {
+    pub fn launch(&mut self) -> DynResult<u32> {
         #[cfg(windows)]
         {
-            use inner_future::process::windows::*;
+            use std::os::windows::process::CommandExt;
             self.cmd.creation_flags(0x08000000);
         }
         let c = match self.cmd.spawn() {

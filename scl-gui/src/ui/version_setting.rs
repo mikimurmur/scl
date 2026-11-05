@@ -5,7 +5,7 @@
 //! （独立设置、版本隔离、模组管理、地图管理、资源包管理）→ 底部
 //! 「高级设置」「补全/修复版本文件」两个等宽按钮。
 //! 页面没有「保存设置」按钮：官方在页面弹出时由
-//! `app::version_setting::on_app_pop_page` 异步落盘。
+//! `app::version_setting::on_app_pop_page` 后台落盘。
 
 use druid::{
     widget::{CrossAxisAlignment, Flex, TextBox},
@@ -72,7 +72,7 @@ fn version_type_from_index(index: u8) -> VersionType {
 
 /// 打开当前版本的游戏目录或其中的子目录（saves / resourcepacks）。
 ///
-/// 官方在点击回调和底部图标回调里直接发起异步任务：加载 `VersionInfo`，
+/// 官方在点击回调和底部图标回调里直接发起后台任务：加载 `VersionInfo`，
 /// 没有独立配置时按全局「版本隔离方式」给出有效 `game_independent`，
 /// 再由 `version_path()` 解析出目录；子目录不存在时先创建再打开。
 fn open_version_dir(_ctx: &druid::EventCtx, data: &AppState, sub: Option<&'static str>) {
@@ -82,13 +82,13 @@ fn open_version_dir(_ctx: &druid::EventCtx, data: &AppState, sub: Option<&'stati
     }
     let version_base = data.versions_folder();
     let independence_method = data.config.version_independent_method;
-    thread_main(async move {
+    thread_main(move || {
         let mut info = CoreVersionInfo {
             version_base: version_base.to_string_lossy().to_string(),
             version: version_name,
             ..Default::default()
         };
-        if info.load().await.is_ok() {
+        if info.load().is_ok() {
             if info.scl_launch_config.is_none() {
                 let game_independent = should_version_independent(
                     independence_method,
@@ -110,7 +110,7 @@ fn open_version_dir(_ctx: &druid::EventCtx, data: &AppState, sub: Option<&'stati
                 } else {
                     dir.push(sub);
                 }
-                let _ = smol::fs::create_dir_all(&dir).await;
+                let _ = fs_err::create_dir_all(&dir);
             }
             if let Some(path) = dir.to_str() {
                 let _ = open_url(path);

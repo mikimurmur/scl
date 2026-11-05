@@ -5,5 +5,6 @@ members = [
     "scl-core",
     "scl-webview",
     "scl-gui-widgets",
-    "scl-gui-animation"
+    "scl-gui-animation",
+    "scl-gui"
 ]

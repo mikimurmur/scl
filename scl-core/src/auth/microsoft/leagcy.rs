@@ -8,14 +8,21 @@ use crate::{
     prelude::*,
 };
 
+/// 传统微软登录使用的客户端 ID
+pub const CLIENT_ID: &str = env!("MICROSOFT_LEGACY_CLIENT_ID");
+
 /**
-    Minecraft 官方启动器的微软登录链接
+    Microsoft 账户登录链接
 
     通过捕获从此链接跳转过来的
     `https://login.live.com/oauth20_desktop.srf?code=[ANYCODE]&lc=1033`
     链接并传入 [`start_auth`] 来获取登录令牌
 */
-pub const MICROSOFT_URL: &str = "https://login.live.com/oauth20_authorize.srf?client_id=00000000402b5328&response_type=code&scope=service%3A%3Auser.auth.xboxlive.com%3A%3AMBI_SSL&redirect_uri=https%3A%2F%2Flogin.live.com%2Foauth20_desktop.srf";
+pub const MICROSOFT_URL: &str = concat!(
+    "https://login.live.com/oauth20_authorize.srf?client_id=",
+    env!("MICROSOFT_LEGACY_CLIENT_ID"),
+    "&response_type=code&scope=service%3A%3Auser.auth.xboxlive.com%3A%3AMBI_SSL&redirect_uri=https%3A%2F%2Flogin.live.com%2Foauth20_desktop.srf"
+);
 
 /**
   微软的登录令牌 API 接口
@@ -82,11 +89,6 @@ pub(super) struct MinecraftXBoxProfileResponse1 {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct XBoxPresenceRescord {
-    // pub xuid: String,
-}
-
 /// 获取 XUID，用途不明，但是在新版本的 Minecraft 有发现需要使用这个 XUID 的地方
 pub async fn get_xuid(userhash: &str, token: &str) -> DynResult<String> {
     let res = crate::http::get("https://userpresence.xboxlive.com/users/me?level=user")
@@ -108,7 +110,8 @@ pub async fn get_xuid(userhash: &str, token: &str) -> DynResult<String> {
 /// 如果续期一个令牌，则 credit 为需要续期的旧令牌
 pub async fn request_token(credit: &str, is_refresh: bool) -> DynResult<(Password, String)> {
     let body = format!(
-        "client_id=00000000402b5328&{}={}&grant_type={}&redirect_uri=https%3A%2F%2Flogin.live.com%2Foauth20_desktop.srf&scope=service%3A%3Auser.auth.xboxlive.com%3A%3AMBI_SSL",
+        "client_id={}&{}={}&grant_type={}&redirect_uri=https%3A%2F%2Flogin.live.com%2Foauth20_desktop.srf&scope=service%3A%3Auser.auth.xboxlive.com%3A%3AMBI_SSL",
+        CLIENT_ID,
         if is_refresh { "refresh_token" } else { "code" }, // Grant Tag
         credit,
         if is_refresh { "refresh_token" } else { "authorization_code" }, // Grant Type
@@ -235,7 +238,7 @@ pub async fn start_auth(_ctx: Option<impl Reporter>, url: &str) -> DynResult<Aut
                 crate::http::get("https://api.minecraftservices.com/entitlements/mcstore")
                     .header(
                         "Authorization",
-                        &format!("Bearer {}", access_token.as_string()),
+                        format!("Bearer {}", access_token.as_string()),
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?
@@ -251,7 +254,7 @@ pub async fn start_auth(_ctx: Option<impl Reporter>, url: &str) -> DynResult<Aut
                 crate::http::get("https://api.minecraftservices.com/minecraft/profile")
                     .header(
                         "Authorization",
-                        &format!("Bearer {}", access_token.as_string()),
+                        format!("Bearer {}", access_token.as_string()),
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?

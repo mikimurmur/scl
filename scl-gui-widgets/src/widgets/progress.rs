@@ -1,8 +1,8 @@
 use druid::{
     kurbo::BezPath,
     piet::{PaintBrush, StrokeStyle},
-    Affine, BoxConstraints, Data, Env, Event, EventCtx, LayoutCtx, LifeCycle, LifeCycleCtx,
-    PaintCtx, RenderContext, Size, UpdateCtx, Widget,
+    BoxConstraints, Data, Env, Event, EventCtx, LayoutCtx, LifeCycle, LifeCycleCtx, PaintCtx,
+    RenderContext, Size, UpdateCtx, Widget,
 };
 
 use crate::theme::color as theme;
@@ -60,11 +60,11 @@ impl<T: Data> Widget<T> for ProgressRing {
 
         let t = self.indeterminate_time;
 
-        // 一些初始数据
-        // TODO: 使其可配置
-        let size = 60.; // 大小
-        let width = 8.; // 线条粗细
+        let size = ctx.size().width.min(ctx.size().height).max(0.);
+        let scale = size / 60.;
+        let width = 8. * scale; // 线条粗细
         let radius = (size - width) / 2.; // 半径
+        let center = size / 2.;
         let speed = std::f64::consts::PI * 3.;
         let target = t * -speed;
 
@@ -85,16 +85,16 @@ impl<T: Data> Widget<T> for ProgressRing {
         let (ex, ey) = end.sin_cos();
         let (p2ox, p2oy) = (end - std::f64::consts::FRAC_PI_2).sin_cos();
 
-        // 点的坐标
-        let start_point = (radius + sx * radius, radius + sy * radius);
-        let end_point = (radius + ex * radius, radius + ey * radius);
+        // 点的坐标（以控件中心为圆心）
+        let start_point = (center + sx * radius, center + sy * radius);
+        let end_point = (center + ex * radius, center + ey * radius);
         let control_1_point = (
-            radius + sx * radius + p1ox * tangent_len,
-            radius + sy * radius + p1oy * tangent_len,
+            center + sx * radius + p1ox * tangent_len,
+            center + sy * radius + p1oy * tangent_len,
         );
         let control_2_point = (
-            radius + ex * radius + p2ox * tangent_len,
-            radius + ey * radius + p2oy * tangent_len,
+            center + ex * radius + p2ox * tangent_len,
+            center + ey * radius + p2oy * tangent_len,
         );
 
         let mut path = BezPath::new();
@@ -105,34 +105,17 @@ impl<T: Data> Widget<T> for ProgressRing {
         let region = ctx.region().bounding_box();
 
         ctx.clip(region);
-        ctx.transform(Affine::translate((4., 4.)));
+        // 官方路径圆心在 (radius, radius)，绘制时平移 (4,4)，最终圆心
+        // 落在控件中心 (30,30)；这里直接把圆心算在控件中心，无需平移。
         ctx.stroke_styled(
             path,
             &PaintBrush::Color(front),
-            8.,
+            width,
             &StrokeStyle {
                 line_cap: druid::piet::LineCap::Round,
                 ..Default::default()
             },
         );
-        if false {
-            fn re((x, y): (f64, f64)) -> druid::Rect {
-                druid::Rect::new(x - 0.5, y - 0.5, x + 0.5, y + 0.5)
-            }
-            // 绘制调试点
-            ctx.stroke(re(start_point), &PaintBrush::Color(druid::Color::RED), 8.);
-            ctx.stroke(
-                re(control_1_point),
-                &PaintBrush::Color(druid::Color::AQUA),
-                8.,
-            );
-            ctx.stroke(
-                re(control_2_point),
-                &PaintBrush::Color(druid::Color::OLIVE),
-                8.,
-            );
-            ctx.stroke(re(end_point), &PaintBrush::Color(druid::Color::GREEN), 8.);
-        }
     }
 
     fn id(&self) -> Option<druid::WidgetId> {

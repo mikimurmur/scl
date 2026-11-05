@@ -23,6 +23,14 @@ pub const POP_PAGE: Selector<&str> = Selector::new("net.stevexmh.scl.pop-page");
 ///
 /// 字符串为需要返回的页面，如果留空则回到上一个页面，如果非空则一直返回到该页面或回到第一页
 pub const QUERY_POP_PAGE: Selector<&str> = Selector::new("net.stevexmh.scl.query-pop-page");
+/// 立即终止指定页面之上的所有页面（含尚未完成推入动画的中间页），然后回到该页面
+///
+/// 仅用于启动失败/崩溃的终态收尾：该序列要求页面栈必须是
+/// `["main", "launch_error"]`，若 500ms 弹栈请求落在 `starting` 的推入动画期间，
+/// 普通 [`QUERY_POP_PAGE`] 会按官方语义直接丢弃，导致 `starting` 永久留在栈上，
+/// 错误页返回时落到启动页。本命令不做延后排队，而是立即撤销未完成的推入动画并
+/// 截断页面链，正常（动画已结束）时行为与 [`QUERY_POP_PAGE`] 完全一致。
+pub const RESET_PAGE_TO: Selector<&str> = Selector::new("net.stevexmh.scl.reset-page-to");
 /// 使分页组件使用滑动动画而非缩放渐变动画的 [`druid::Command`]
 ///
 /// 参数为是否使用滑动动画
@@ -97,6 +105,19 @@ impl<T: Data> PageSwitcher<T> {
         }
     }
 
+    /// 把弹栈动画加入队列。
+    fn enqueue_pop(&mut self, ctx: &mut EventCtx, target: &'static str) {
+        if self.slide_page_animation {
+            self.page_anime_queue
+                .push_back(AnimationType::PopSlide(target));
+        } else {
+            self.page_anime_queue
+                .push_back(AnimationType::PopZoom(target));
+        }
+        self.skip_first_anime_frame = 1;
+        ctx.request_anim_frame();
+    }
+
     /// 增加一个页面，需要一个页面 ID 和一个生成该页面组件的回调函数
     pub fn add_page(
         &mut self,
@@ -163,28 +184,58 @@ impl<T: Data> Widget<T> for PageSwitcher<T> {
                                     ctx.children_changed();
                                     ctx.request_update();
                                     self.active_page = page;
+                                    // 页面切换后清掉被缓存页面残留的悬停状态，
+                                    // 否则未移动鼠标时旧页面中的行会保持高亮。
+                                    if let Some(inner) = self.inner.get_mut(page) {
+                                        if inner.is_initialized() {
+                                            inner.event(
+                                                ctx,
+                                                &Event::Internal(InternalEvent::MouseLeave),
+                                                data,
+                                                env,
+                                            );
+                                        }
+                                    }
                                     ctx.submit_notification_without_warning(
                                         ON_PAGE.with(page).to(Target::Global),
                                     );
                                     self.page_chain.push(page);
+                                    tracing::trace!(
+                                        "page pushed: {page:?}, chain={:?}",
+                                        self.page_chain
+                                    );
                                 }
                                 Some(AnimationType::PopZoom(page))
-                                | Some(AnimationType::PopSlide(page)) => {
-                                    if !page.is_empty() && self.page_chain.contains(&page) {
-                                        ctx.submit_notification_without_warning(
-                                            POP_PAGE.with(self.active_page),
-                                        );
-                                        self.active_page = page;
-                                        ctx.submit_notification_without_warning(
-                                            ON_PAGE.with(page).to(Target::Global),
-                                        );
-                                        while self.page_chain.last().unwrap() != &page {
-                                            self.page_chain.pop();
+                                | Some(AnimationType::PopSlide(page))
+                                    if !page.is_empty() && self.page_chain.contains(&page) =>
+                                {
+                                    ctx.submit_notification_without_warning(
+                                        POP_PAGE.with(self.active_page),
+                                    );
+                                    self.active_page = page;
+                                    if let Some(inner) = self.inner.get_mut(page) {
+                                        if inner.is_initialized() {
+                                            inner.event(
+                                                ctx,
+                                                &Event::Internal(InternalEvent::MouseLeave),
+                                                data,
+                                                env,
+                                            );
                                         }
-                                        self.clean_unused_page();
-                                        ctx.children_changed();
-                                        ctx.request_update();
                                     }
+                                    ctx.submit_notification_without_warning(
+                                        ON_PAGE.with(page).to(Target::Global),
+                                    );
+                                    while self.page_chain.last().unwrap() != &page {
+                                        self.page_chain.pop();
+                                    }
+                                    self.clean_unused_page();
+                                    ctx.children_changed();
+                                    ctx.request_update();
+                                    tracing::trace!(
+                                        "page popped to {page:?}, chain={:?}",
+                                        self.page_chain
+                                    );
                                 }
                                 _ => {}
                             }
@@ -198,6 +249,12 @@ impl<T: Data> Widget<T> for PageSwitcher<T> {
             }
         } else if let Event::Command(cmd) = event {
             if let Some(&page) = cmd.get(PUSH_PAGE) {
+                tracing::debug!(
+                    "PUSH_PAGE: page={page:?}, chain={:?}, active={:?}, queue={}",
+                    self.page_chain,
+                    self.active_page,
+                    self.page_anime_queue.len()
+                );
                 self.load_page(page);
                 ctx.children_changed();
                 if self.inner.contains_key(page) {
@@ -223,35 +280,99 @@ impl<T: Data> Widget<T> for PageSwitcher<T> {
                     panic!("Can't find inner page called {page}");
                 }
             } else if let Some(to_page) = cmd.get(QUERY_POP_PAGE) {
-                if self.page_anime_queue.is_empty() {
-                    if to_page == self.page_chain.last().unwrap() {
-                    } else if !to_page.is_empty() {
-                        if self.page_chain.len() > 1 {
-                            if self.slide_page_animation {
-                                self.page_anime_queue
-                                    .push_back(AnimationType::PopSlide(to_page));
-                            } else {
-                                self.page_anime_queue
-                                    .push_back(AnimationType::PopZoom(to_page));
-                            }
-                            self.skip_first_anime_frame = 1;
-                            ctx.request_anim_frame();
-                        } else {
-                            tracing::trace!("WARNING: Back page invoked when the page is only one!")
-                        }
-                    } else if self.page_chain.len() > 1 {
-                        let to_page = self.page_chain[self.page_chain.len() - 2];
-                        if self.slide_page_animation {
-                            self.page_anime_queue
-                                .push_back(AnimationType::PopSlide(to_page));
-                        } else {
-                            self.page_anime_queue
-                                .push_back(AnimationType::PopZoom(to_page));
-                        }
-                        self.skip_first_anime_frame = 1;
-                        ctx.request_anim_frame();
+                tracing::debug!(
+                    "QUERY_POP_PAGE: to={to_page:?}, chain={:?}, active={:?}, queue={}",
+                    self.page_chain,
+                    self.active_page,
+                    self.page_anime_queue.len()
+                );
+                // 解析目标页面为链上的 &'static str，空字符串表示返回上一页。
+                let target = if to_page.is_empty() {
+                    if self.page_chain.len() > 1 {
+                        Some(self.page_chain[self.page_chain.len() - 2])
                     } else {
-                        tracing::trace!("WARNING: Back page invoked when the page is only one!")
+                        tracing::trace!("WARNING: Back page invoked when the page is only one!");
+                        None
+                    }
+                } else if let Some(page) =
+                    self.page_chain.iter().copied().find(|p| p == to_page)
+                {
+                    Some(page)
+                } else {
+                    tracing::trace!("WARNING: Can't find page {to_page:?} in page chain");
+                    None
+                };
+                if let Some(target) = target {
+                    // 与官方 PageSwitcher 一致：动画进行中收到的弹栈请求直接丢弃，
+                    // 不挂起延后执行。此前本地把请求存进 pending_pop、等队列排空再执行，
+                    // 导致「启动页推入动画期间收到 pop(main)」被延后到 launch_error
+                    // 页 push 之后才执行，把刚显示的错误页一并弹掉（错误页闪一下回主页）。
+                    // 由此带来的「启动成功后停在启动页」与官方一致（OB-15，勿"修"）：官方
+                    // 的成功 pop 在窗口等待之后才发出，无窗口环境同样不弹栈。
+                    if self.page_anime_queue.is_empty() {
+                        if target != self.active_page && self.page_chain.len() > 1 {
+                            self.enqueue_pop(ctx, target);
+                        }
+                    } else {
+                        tracing::debug!(
+                            "animation in progress, drop pop request to {target:?}"
+                        );
+                    }
+                }
+            } else if let Some(to_page) = cmd.get(RESET_PAGE_TO) {
+                tracing::debug!(
+                    "RESET_PAGE_TO: to={to_page:?}, chain={:?}, active={:?}, queue={}",
+                    self.page_chain,
+                    self.active_page,
+                    self.page_anime_queue.len()
+                );
+                let target = self.page_chain.iter().copied().find(|p| p == to_page);
+                if let Some(target) = target {
+                    if self.page_anime_queue.is_empty()
+                        && target != self.active_page
+                        && self.page_chain.len() > 1
+                    {
+                        // 动画已结束：与普通弹栈完全一致，保留弹出动画。
+                        self.enqueue_pop(ctx, target);
+                    } else {
+                        // 动画进行中（典型为 starting 推入尚未完成）：立即撤销
+                        // 所有未完成动画并截断页面链，不延后、不排队。
+                        self.page_anime_queue.clear();
+                        self.page_anime_timer = 0;
+                        self.skip_first_anime_frame = 0;
+                        let changed = !self.active_page.is_empty() && self.active_page != target;
+                        if changed {
+                            ctx.submit_notification_without_warning(
+                                POP_PAGE.with(self.active_page),
+                            );
+                        }
+                        self.active_page = target;
+                        while self.page_chain.last() != Some(&target) {
+                            self.page_chain.pop();
+                        }
+                        self.clean_unused_page();
+                        if changed {
+                            if let Some(inner) = self.inner.get_mut(target) {
+                                if inner.is_initialized() {
+                                    inner.event(
+                                        ctx,
+                                        &Event::Internal(InternalEvent::MouseLeave),
+                                        data,
+                                        env,
+                                    );
+                                }
+                            }
+                            ctx.submit_notification_without_warning(
+                                ON_PAGE.with(target).to(Target::Global),
+                            );
+                        }
+                        ctx.children_changed();
+                        ctx.request_update();
+                        ctx.request_paint();
+                        tracing::debug!(
+                            "RESET_PAGE_TO: chain truncated to {target:?}, chain={:?}",
+                            self.page_chain
+                        );
                     }
                 }
             } else if let Some(&t) = cmd.get(SET_SLIDE_PAGE_ANIMATION) {
@@ -282,13 +403,13 @@ impl<T: Data> Widget<T> for PageSwitcher<T> {
         if let LifeCycle::WidgetAdded = event {
             ctx.request_anim_frame();
         }
-        for (_, inner) in self.inner.iter_mut() {
+        for inner in self.inner.values_mut() {
             inner.lifecycle(ctx, event, data, env);
         }
     }
 
     fn update(&mut self, ctx: &mut druid::UpdateCtx, _old_data: &T, data: &T, env: &druid::Env) {
-        for (_, inner) in self.inner.iter_mut() {
+        for inner in self.inner.values_mut() {
             inner.update(ctx, data, env);
         }
     }
@@ -301,7 +422,7 @@ impl<T: Data> Widget<T> for PageSwitcher<T> {
         env: &druid::Env,
     ) -> druid::Size {
         bc.debug_check("PageSwitcher");
-        for (_, inner) in self.inner.iter_mut() {
+        for inner in self.inner.values_mut() {
             inner.layout(ctx, bc, data, env);
             inner.set_origin(ctx, druid::Point::ZERO);
         }

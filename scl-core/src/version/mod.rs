@@ -98,7 +98,7 @@ pub async fn get_avaliable_versions(
 }
 
 /// 版本类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum VersionType {
     /// 纯净版本
@@ -116,13 +116,8 @@ pub enum VersionType {
     /// 如果其是通过其它模组加载器加载的（Forge 或 Fabric），则优先为模组加载器版本
     Optifine,
     /// 未知版本
+    #[default]
     Unknown,
-}
-
-impl Default for VersionType {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 /// 当解析出错时，此处为错误枚举值

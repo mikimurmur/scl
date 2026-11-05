@@ -170,18 +170,13 @@ pub mod main {
 use serde::{Deserialize, Serialize};
 
 /// 页面主题颜色，有亮色和暗色区分
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Theme {
     /// 亮色模式
+    #[default]
     Light,
     /// 暗色模式
     Dark,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Self::Light
-    }
 }
 
 use druid::{Color, Env, FontDescriptor, FontFamily, FontStyle, FontWeight};

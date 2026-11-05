@@ -1,7 +1,14 @@
 //! 获取 authlib-injector 第三方登录代理 jar
 
-use super::{DownloadSource, Downloader};
+use std::time::Duration;
+
+use super::{timeout_after, DownloadSource, Downloader};
 use crate::prelude::*;
+
+/// Authlib-Injector 元数据请求的兜底超时
+const META_TIMEOUT: Duration = Duration::from_secs(20);
+/// Authlib-Injector 文件下载的兜底超时
+const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Deserialize)]
 struct LatestData {
@@ -27,21 +34,30 @@ impl<R: Reporter> AuthlibDownloadExt for Downloader<R> {
         let r = self.reporter.clone();
         r.add_max_progress(2.);
         r.set_message("正在获取 Authlib-Injector 版本元数据".into());
-        let latest_data: LatestData = crate::http::get(match self.source {
+        let meta_uri = match self.source {
             DownloadSource::BMCLAPI => {
                 "https://bmclapi2.bangbang93.com/mirrors/authlib-injector/artifact/latest.json"
             }
             _ => "https://authlib-injector.yushi.moe/artifact/latest.json",
-        })
-        .recv_json()
+        };
+        let latest_data: LatestData = match timeout_after(
+            META_TIMEOUT,
+            crate::http::get(meta_uri).recv_json(),
+        )
         .await
+        {
+            Some(res) => res,
+            None => anyhow::bail!("获取 Authlib-Injector 版本元数据超时：{meta_uri}"),
+        }
         .map_err(|e| anyhow::anyhow!(e))?;
         r.add_progress(1.);
         r.set_message(format!("正在下载 Authlib-Injector {}", latest_data.version));
         let download_url = latest_data.download_url;
-        let resp = crate::http::get(download_url)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let resp = match timeout_after(FILE_TIMEOUT, crate::http::get(&download_url)).await {
+            Some(res) => res,
+            None => anyhow::bail!("下载 Authlib-Injector 超时：{download_url}"),
+        }
+        .map_err(|e| anyhow::anyhow!(e))?;
         let temp_dest_path = format!("{dest_path}.tmp");
         let f = inner_future::fs::OpenOptions::new()
             .write(true)
@@ -49,7 +65,12 @@ impl<R: Reporter> AuthlibDownloadExt for Downloader<R> {
             .create(true)
             .open(&temp_dest_path)
             .await?;
-        inner_future::io::copy(resp, f).await?;
+        match timeout_after(FILE_TIMEOUT, inner_future::io::copy(resp, f)).await {
+            Some(res) => {
+                res?;
+            }
+            None => anyhow::bail!("写入 Authlib-Injector 超时：{temp_dest_path}"),
+        }
         r.add_progress(1.);
         inner_future::fs::rename(temp_dest_path, dest_path).await?;
         Ok(())

@@ -155,7 +155,7 @@ impl<T: Display> MicrosoftOAuth<T> {
                 crate::http::get("https://api.minecraftservices.com/entitlements/mcstore")
                     .header(
                         "Authorization",
-                        &format!("Bearer {}", &access_token.as_string()),
+                        format!("Bearer {}", access_token.as_string()),
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?
@@ -173,7 +173,7 @@ impl<T: Display> MicrosoftOAuth<T> {
                 crate::http::get("https://api.minecraftservices.com/minecraft/profile")
                     .header(
                         "Authorization",
-                        &format!("Bearer {}", &access_token.as_string()),
+                        format!("Bearer {}", access_token.as_string()),
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!(e))?

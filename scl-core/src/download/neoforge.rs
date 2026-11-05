@@ -246,7 +246,7 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
         cmd.arg("-cp");
         cmd.arg(format!(
             "{}{}{}",
-            &installer_path, CLASS_PATH_SPAREATOR, &tmp_full_path
+            installer_path, CLASS_PATH_SPAREATOR, tmp_full_path
         ));
         cmd.arg("com.bangbang93.ForgeInstaller");
         cmd.arg(self.minecraft_path.as_str()); // 安装位置

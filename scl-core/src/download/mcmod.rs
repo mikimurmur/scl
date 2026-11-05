@@ -11,10 +11,7 @@ pub async fn get_mod_cname(modid: &str) -> String {
     .await
     {
         if resp.status().is_success() {
-            match resp.body_string().await {
-                Ok(cname) => cname,
-                _ => String::new(),
-            }
+            resp.body_string().await.unwrap_or_default()
         } else {
             String::new()
         }

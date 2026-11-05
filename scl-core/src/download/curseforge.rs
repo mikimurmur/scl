@@ -1,6 +1,4 @@
 //! CurseForge 模组下载的结构和接口
-//!
-//! 在使用这个模块提供的功能前，请先设定好 `CURSEFORGE_API_KEY` 环境变量为你 CurseForge 的开发者令牌，否则服务将无法使用
 
 /*
     基本链接：https://addons-ecs.forgesvc.net/api/v2/addon/
@@ -32,7 +30,7 @@ use std::{
 
 use crate::prelude::*;
 
-const API_KEY: Option<&str> = std::option_env!("CURSEFORGE_API_KEY");
+const API_KEY: &str = env!("CURSEFORGE_API_KEY");
 const BASE_URL: &str = "https://api.curseforge.com/v1/";
 const BASE_URL_SEARCH: &str = "https://api.curseforge.com/v1/mods/search?gameId=432&classId=6";
 
@@ -195,53 +193,63 @@ pub async fn search_mods(
     }
     tracing::trace!("Searching by {base_url}");
     let data: Response<Vec<ModInfo>> = crate::http::get(&base_url)
-        .header("x-api-key", API_KEY.unwrap_or_default())
+        .header("x-api-key", API_KEY)
         .await
         .map_err(|e| anyhow::anyhow!(e))?
         .body_json()
         .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        // into_inner 取出 surf 错误内部的 anyhow（底层 serde 错误链保留），
+        // 使「执行异步任务发生错误」弹窗与官方一致显示 serde Debug 形态
+        // （如 Error("invalid type: null, expected a string", line: 1, column: 426)）。
+        .map_err(surf::Error::into_inner)?;
     Ok(data.data)
 }
 
 /// 通过模组在 Curseforge 的 ID 获取详情信息
 pub async fn get_mod_info(modid: u64) -> DynResult<ModInfo> {
-    let data: Response<ModInfo> = crate::http::get(&(format!("{BASE_URL}mods/{modid}")))
-        .header("x-api-key", API_KEY.unwrap_or_default())
+    let data: Response<ModInfo> = crate::http::get(format!("{BASE_URL}mods/{modid}"))
+        .header("x-api-key", API_KEY)
         .await
         .map_err(|e| anyhow::anyhow!(e))?
         .body_json()
         .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(surf::Error::into_inner)?;
     Ok(data.data)
 }
 
 /// 获取模组在 Curseforge 的 ID 获取可下载的模组文件列表
 pub async fn get_mod_files(modid: u64) -> DynResult<Vec<ModFile>> {
-    let data: Response<Vec<ModFile>> = crate::http::get(&format!("{BASE_URL}mods/{modid}/files"))
-        .header("x-api-key", API_KEY.unwrap_or_default())
+    let data: Response<Vec<ModFile>> = crate::http::get(format!("{BASE_URL}mods/{modid}/files"))
+        .header("x-api-key", API_KEY)
         .await
         .map_err(|e| anyhow::anyhow!(e))?
         .body_json()
         .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .map_err(surf::Error::into_inner)?;
     Ok(data.data)
 }
 
 /// 获取模组在 Curseforge 的 ID 获取模组的图标
+/// 通过图标 URL 获取模组图标
+pub async fn get_mod_icon_url(url: &str) -> DynResult<image::DynamicImage> {
+    let data = crate::http::get(url)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?
+        .body_bytes()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    // 官方在 mods_download_*::get_icon 闭包里对图标做 resize_to_fill
+    image::load_from_memory(&data)
+        .map(|img| {
+            img.resize_to_fill(64, 64, image::imageops::FilterType::Triangle)
+        })
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// 通过模组信息里的 logo 地址获取模组图标
 pub async fn get_mod_icon(mod_info: &ModInfo) -> DynResult<image::DynamicImage> {
     if let Some(logo) = &mod_info.logo {
-        let data = crate::http::get(&logo.thumbnail_url)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?
-            .body_bytes()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        if let Ok(img) = image::load_from_memory(&data) {
-            Ok(img)
-        } else {
-            anyhow::bail!("Can't load mod icon image")
-        }
+        get_mod_icon_url(&logo.thumbnail_url).await
     } else {
         anyhow::bail!("Mod icon image is empty")
     }
@@ -272,4 +280,39 @@ pub async fn download_mod(
     inner_future::io::copy(res, &mut file).await?;
     inner_future::fs::rename(format!("{}.tmp", dest.to_str().unwrap()), dest).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// 「执行异步任务发生错误」弹窗的错误文本保留底层 serde Debug 形态。
+    ///
+    /// body_json 错误经 `surf::Error::into_inner` 取出内部 anyhow（保留 serde 底层），
+    /// 再以 `{err:#?}`（alternate）取底层 Debug；GUI 层使用同样的格式。
+    #[test]
+    fn body_json_error_keeps_serde_debug_shape() {
+        #[derive(serde::Deserialize, Debug)]
+        struct Sample {
+            // 字段只需存在以触发 serde 解析错误，无需读取
+            #[allow(dead_code)]
+            slug: String,
+        }
+        // 与 CF API 同款：字段为 null 而结构体声明 String
+        let body = r#"[{"slug":null}]"#.as_bytes();
+        let serde_err = serde_json::from_slice::<Vec<Sample>>(body).unwrap_err();
+        let surf_err = surf::Error::from(serde_err);
+        let err: anyhow::Error = surf_err.into_inner();
+        let rendered = format!("{err:#?}");
+        assert!(
+            rendered.starts_with("Error(\"invalid type: null, expected a string\""),
+            "应为 serde Debug 形态，实际：{rendered}"
+        );
+        assert!(
+            rendered.contains("line: 1, column:"),
+            "应含 line/column 定位，实际：{rendered}"
+        );
+        assert!(
+            !rendered.contains(" at line 1 column"),
+            "不应是 Display 形态（at line ... column ...），实际：{rendered}"
+        );
+    }
 }

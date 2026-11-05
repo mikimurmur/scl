@@ -137,11 +137,9 @@ impl<T: Data> Widget<T> for StartGameButton<T> {
                 ctx.set_active(true);
                 ctx.request_paint();
             }
-            Event::MouseUp(_) => {
-                if ctx.is_active() {
-                    ctx.set_active(false);
-                    ctx.request_paint();
-                }
+            Event::MouseUp(_) if ctx.is_active() => {
+                ctx.set_active(false);
+                ctx.request_paint();
             }
             _ => (),
         }

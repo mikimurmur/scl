@@ -116,6 +116,12 @@ impl<T: Data + PartialEq> Widget<T> for Radio<T> {
 
     #[instrument(name = "Radio", level = "trace", skip(self, ctx, event, data, env))]
     fn lifecycle(&mut self, ctx: &mut LifeCycleCtx, event: &LifeCycle, data: &T, env: &Env) {
+        // 官方截图：选中项标签为 base::HIGH，未选中项标签为 base::MEDIUM。
+        self.child_label.set_text_color(if data == &self.variant {
+            crate::theme::color::base::HIGH
+        } else {
+            crate::theme::color::base::MEDIUM
+        });
         self.child_label.lifecycle(ctx, event, data, env);
         if let LifeCycle::HotChanged(_) | LifeCycle::DisabledChanged(_) = event {
             let target_radius = if data == &self.variant {
@@ -146,6 +152,13 @@ impl<T: Data + PartialEq> Widget<T> for Radio<T> {
 
     #[instrument(name = "Radio", level = "trace", skip(self, ctx, old_data, data, env))]
     fn update(&mut self, ctx: &mut UpdateCtx, old_data: &T, data: &T, env: &Env) {
+        // 颜色变化需要重新构建标签的 TextLayout，否则 paint 会因布局未重建而 panic。
+        self.child_label.set_text_color(if data == &self.variant {
+            crate::theme::color::base::HIGH
+        } else {
+            crate::theme::color::base::MEDIUM
+        });
+        ctx.request_layout();
         self.child_label.update(ctx, old_data, data, env);
         if !old_data.same(data) {
             let target_radius = if data == &self.variant {

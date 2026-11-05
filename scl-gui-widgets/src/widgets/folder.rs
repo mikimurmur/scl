@@ -58,14 +58,10 @@ impl<T: Data> Widget<T> for FolderList<T> {
                     true
                 }
             }
-            Event::MouseMove(m) => {
-                if self.hot != (m.pos.y < 40.) {
-                    self.hot = m.pos.y < 40.;
-                    ctx.request_paint();
-                    true
-                } else {
-                    true
-                }
+            Event::MouseMove(m) if self.hot != (m.pos.y < 40.) => {
+                self.hot = m.pos.y < 40.;
+                ctx.request_paint();
+                true
             }
             _ => true,
         };

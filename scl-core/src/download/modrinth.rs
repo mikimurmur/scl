@@ -97,6 +97,12 @@ pub async fn get_mod_icon(modid: &str) -> DynResult<DynamicImage> {
 ///
 /// 如果图标不存在则返回一个 1x1 的透明像素图片
 pub async fn get_mod_icon_by_url(url: &str) -> DynResult<DynamicImage> {
+    let img = get_mod_icon_by_url_inner(url).await?;
+    // 与官方一致：图标统一 resize_to_fill 到 64x64（见 curseforge::get_mod_icon_url 注释）
+    Ok(img.resize_to_fill(64, 64, image::imageops::FilterType::Triangle))
+}
+
+async fn get_mod_icon_by_url_inner(url: &str) -> DynResult<DynamicImage> {
     if url.is_empty() {
         let mut img = image::RgbaImage::new(1, 1);
         img.put_pixel(0, 0, image::Rgba([0xFF, 0xFF, 0xFF, 0]));
@@ -161,7 +167,9 @@ pub async fn search_mods(
     ))
     .recv_json()
     .await
-    .map_err(|e| anyhow::anyhow!(e))?;
+    // 与 CurseForge 侧一致：into_inner 保留底层 serde 错误链，
+    // 异步错误弹窗显示官方同款 Debug 形态。
+    .map_err(surf::Error::into_inner)?;
     Ok(r.hits
         .into_iter()
         .map(|mut a| {

@@ -173,14 +173,12 @@ impl<T: Data> Widget<T> for ListItem<T> {
                 ctx.set_active(true);
                 ctx.request_paint();
             }
-            Event::MouseUp(_) => {
-                if ctx.is_active() {
-                    ctx.set_active(false);
-                    if ctx.is_hot() {
-                        *data = self.variant.clone();
-                    }
-                    ctx.request_paint();
+            Event::MouseUp(_) if ctx.is_active() => {
+                ctx.set_active(false);
+                if ctx.is_hot() {
+                    *data = self.variant.clone();
                 }
+                ctx.request_paint();
             }
             _ => (),
         }

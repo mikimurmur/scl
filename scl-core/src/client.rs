@@ -15,7 +15,7 @@ use super::{
 use crate::{
     java::JavaRuntime,
     prelude::*,
-    utils::{get_full_path, CLASSPATH_SEPARATOR, NATIVE_ARCH_LAZY, TARGET_OS},
+    utils::{get_full_path, CLASSPATH_SEPARATOR},
     version::structs::{Allowed, VersionMeta},
 };
 
@@ -120,7 +120,7 @@ impl Client {
     /// 这将会检查元数据，并组合出启动参数，之后可以使用 [`Client::launch`] 启动游戏
     pub async fn new(mut cfg: ClientConfig) -> DynResult<Self> {
         if cfg.version_info.meta.is_none() {
-            anyhow::bail!("version_info is empty");
+            anyhow::bail!("VersionInfo must have meta loaded");
         }
         // let build_args_timer = std::time::Instant::now();
         let mut args = Vec::<String>::with_capacity(64);
@@ -150,7 +150,7 @@ impl Client {
                 .ok_or_else(|| anyhow::anyhow!("There's no parent from the library path"))?
                 .join("libraries");
             let lib_path = get_full_path(lib_path);
-            lib_path.replace(|a| a == '/' || a == '\\', "/")
+            lib_path.replace(['/', '\\'], "/")
         });
         variables.insert("${classpath}", {
             // 类路径，所有的 jar 库
@@ -192,7 +192,7 @@ impl Client {
                             "{}{sep}{}",
                             lib_base_path,
                             d.path
-                                .replace(|a| a == '/' || a == '\\', std::path::MAIN_SEPARATOR_STR),
+                                .replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR),
                             sep = std::path::MAIN_SEPARATOR
                         )
                     } else {
@@ -201,37 +201,6 @@ impl Client {
                 } else {
                     lib_path
                 };
-                if let Some(n) = &lib.natives {
-                    if false {
-                        if let Some(native_key) = n.get(TARGET_OS) {
-                            let native_key =
-                                native_key.replace("${arch}", NATIVE_ARCH_LAZY.as_ref());
-                            let classifier = lib
-                                .downloads
-                                .as_ref()
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!("No downloads struct for {}", &native_key)
-                                })?
-                                .classifiers
-                                .as_ref()
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!("No classifiers struct for {}", &native_key)
-                                })?
-                                .get(&native_key)
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!("No classifier struct for {}", &native_key)
-                                })?;
-                            lib_path += CLASSPATH_SEPARATOR;
-                            lib_path += &lib_base_path;
-                            lib_path.push(std::path::MAIN_SEPARATOR);
-                            lib_path += &classifier
-                                .path
-                                .replace(|a| a == '/' || a == '\\', std::path::MAIN_SEPARATOR_STR);
-                            // TODO: 解压原生库
-                        }
-                    }
-                    // 可能有原生库要添加
-                }
                 lib_args.insert(class_name, lib_path);
             }
 
@@ -244,7 +213,7 @@ impl Client {
                         .into_iter()
                         .map(|x| x.1)
                         .chain(meta.main_jars.iter().map(|a| {
-                            a.replace(|a| a == '/' || a == '\\', std::path::MAIN_SEPARATOR_STR)
+                            a.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR)
                         }))
                         .collect()
                 };
@@ -347,7 +316,7 @@ impl Client {
             },
         );
         variables.insert("${auth_session}", "token:0".into());
-        variables.insert("${clientid}", "00000000402b5328".into());
+        variables.insert("${clientid}", env!("MICROSOFT_LEGACY_CLIENT_ID").into());
         variables.insert(
             "${auth_access_token}",
             match &cfg.auth {
@@ -372,7 +341,7 @@ impl Client {
             match &cfg.auth {
                 AuthMethod::Offline { .. } => "Legacy".into(),
                 AuthMethod::Mojang { .. } | AuthMethod::AuthlibInjector { .. } => "Mojang".into(),
-                AuthMethod::Microsoft { uuid: _, .. } => "msa".into(),
+                AuthMethod::Microsoft { .. } => "msa".into(),
             },
         );
         variables.insert("${version_type}", cfg.version_type.to_owned());
@@ -420,6 +389,7 @@ impl Client {
             ..
         } = &cfg.auth
         {
+            tracing::info!("检查 Authlib Injector 注入库");
             // 注入 Authlib Injector
             let authlib_injector_path = get_full_path(format!(
                 "{}{sep}..{sep}authlib-injector.jar",

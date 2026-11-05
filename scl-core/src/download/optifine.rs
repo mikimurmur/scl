@@ -179,7 +179,7 @@ impl<R: Reporter> OptifineDownloadExt for Downloader<R> {
             cmd.arg("-cp");
             cmd.arg(format!(
                 "{}{}{}",
-                &installer_path, CLASS_PATH_SPAREATOR, &full_path
+                installer_path, CLASS_PATH_SPAREATOR, full_path
             ));
             cmd.arg("net.stevexmh.OptifineInstaller");
             cmd.arg(self.minecraft_path.as_str()); // .minecraft

@@ -67,18 +67,13 @@ struct SliderKnob {
 }
 
 /// The shape of the slider knobs.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum KnobStyle {
     /// Circle
+    #[default]
     Circle,
     /// Wedge
     Wedge,
-}
-
-impl Default for KnobStyle {
-    fn default() -> Self {
-        Self::Circle
-    }
 }
 
 impl Slider {

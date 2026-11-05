@@ -115,7 +115,13 @@ pub(crate) mod mojang {
     #[serde(rename_all = "camelCase")]
     pub(crate) struct AuthenticateResponse {
         pub access_token: Password,
+        /// Yggdrasil 规范里响应中的 clientToken 是可选的，部分实现不回传。
+        #[serde(default)]
         pub client_token: String,
+        /// 刷新接口的响应允许省略 availableProfiles（littleskin 实测如此）。
+        /// 原实现把它当必填，缺字段时成功响应会被错误结构二次解析失败掩盖成
+        /// `missing field \`error\``，导致外置登录无法完成。
+        #[serde(default)]
         pub available_profiles: Vec<AvaliableProfile>,
         pub selected_profile: Option<AvaliableProfile>,
     }
@@ -150,6 +156,8 @@ pub(crate) mod mojang {
     pub(crate) struct ProfileResponse {
         pub id: String,
         pub name: String,
+        /// 无材质时部分服务端会省略 properties 字段。
+        #[serde(default)]
         pub properties: Vec<ProfilePropertie>,
     }
 

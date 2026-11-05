@@ -57,9 +57,9 @@ impl<T> Icon<T> {
         }
         self.icon_path = BezPath::from_svg(env.get(&self.icon_key).as_str()).unwrap_or_default();
         if env.get(crate::theme::color::main::IS_DARK) {
-            self.set_brush(PaintBrush::Color(env.get(&self.icon_color_key.0)));
-        } else {
             self.set_brush(PaintBrush::Color(env.get(&self.icon_color_key.1)));
+        } else {
+            self.set_brush(PaintBrush::Color(env.get(&self.icon_color_key.0)));
         }
     }
 }
@@ -87,7 +87,13 @@ impl<T: Data> Widget<T> for Icon<T> {
     }
 
     fn update(&mut self, ctx: &mut druid::UpdateCtx, _old_data: &T, data: &T, env: &druid::Env) {
-        if ctx.env_key_changed(&self.icon_key) {
+        // 官方 reload_icon 只在图标路径键变化时重载；这里额外监听亮/暗颜色键与
+        // IS_DARK，保证图标主题改色或暗黑模式切换后无需重启即可重绘。
+        if ctx.env_key_changed(&self.icon_key)
+            || ctx.env_key_changed(&self.icon_color_key.0)
+            || ctx.env_key_changed(&self.icon_color_key.1)
+            || ctx.env_key_changed(&crate::theme::color::main::IS_DARK)
+        {
             self.reload_icon(data, env);
         }
     }

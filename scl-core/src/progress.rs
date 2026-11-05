@@ -31,6 +31,11 @@ pub trait Reporter: Clone + Send + Sync {
     }
 }
 
+/// 方法集与 [`ReportState`] 变体一一对应，构成进度上报协议的完整命令集
+/// （GUI 侧 SET_SUB_MESSAGE / SET_PROGRESS / HIDE_PROGRESS 均有对应的命令
+/// 处理与界面绘制通路）。当前核心库下载器只用到其中一部分方法，保留全集
+/// 以维持协议对称，方便后续接线次级进度时无需改动 trait。
+#[allow(dead_code)]
 pub(crate) trait Progress: Reporter {
     fn set_message(&self, msg: String) {
         self.send(ReportState::SetMessage(msg));
@@ -54,7 +59,7 @@ pub(crate) trait Progress: Reporter {
         self.send(ReportState::SetIndeterminateProgress);
     }
     fn hide_progress(&self) {
-        self.send(ReportState::SetIndeterminateProgress);
+        self.send(ReportState::HideProgress);
     }
     fn remove_progress(self) {
         self.send(ReportState::RemoveProgress);

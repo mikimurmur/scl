@@ -1,4 +1,6 @@
-use druid::{commands::CONFIGURE_WINDOW, kurbo::BezPath, piet::*, *};
+use druid::{
+    commands::CONFIGURE_WINDOW, kurbo::BezPath, piet::*, piet::TextLayout, *,
+};
 
 use crate::{theme::color as theme, utils::color::get_contrast_yiq};
 

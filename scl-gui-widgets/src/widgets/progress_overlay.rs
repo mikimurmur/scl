@@ -89,6 +89,9 @@ impl<T> ProgressOverlay<T> {
         false
     }
 
+    /// Windows/macOS 任务栏进度；调用点位于同名 cfg 块内，
+    /// Linux 构建不编译该方法（官方 Linux 版也不接系统任务栏）。
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     fn update_taskbar_progress(&self, _handle: RawWindowHandle) {
         #[cfg(target_os = "windows")]
         {
@@ -315,7 +318,13 @@ impl<T: Data> Widget<T> for ProgressOverlay<T> {
             }
             Event::AnimFrame(_) => {
                 if self.should_update_progress() || !self.progress_height_spring.arrived() {
-                    self.update_taskbar_progress(ctx.window().raw_window_handle());
+                    // Linux 不接入系统任务栏进度；
+                    // GTK 后端没有 RawWindowHandle，取句柄会在每一帧打印
+                    // “HasRawWindowHandle trait not implemented for gtk.”。
+                    #[cfg(any(target_os = "windows", target_os = "macos"))]
+                    if self.show_progress_on_taskbar {
+                        self.update_taskbar_progress(ctx.window().raw_window_handle());
+                    }
                     ctx.request_paint();
                     ctx.request_anim_frame();
                     ctx.request_layout();
@@ -359,6 +368,18 @@ impl<T: Data> Widget<T> for ProgressOverlay<T> {
                             ctx.window().raw_window_handle(),
                             raw_window_handle_5::RawDisplayHandle::Windows(
                                 raw_window_handle_5::WindowsDisplayHandle::empty(),
+                            ),
+                        ) {
+                            let _ = indicator.needs_attention(true);
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    if self.progress_map.is_empty() && self.show_progress_on_taskbar {
+                        use taskbar_interface::*;
+                        if let Ok(mut indicator) = TaskbarInterface::new(
+                            ctx.window().raw_window_handle(),
+                            raw_window_handle_5::RawDisplayHandle::AppKit(
+                                raw_window_handle_5::AppKitDisplayHandle::empty(),
                             ),
                         ) {
                             let _ = indicator.needs_attention(true);

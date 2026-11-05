@@ -1,6 +1,6 @@
 //! 原版游戏的下载模块
 
-use std::{borrow::Cow, collections::HashMap, path::Path};
+use std::{borrow::Cow, collections::HashMap, path::Path, time::Duration};
 
 use anyhow::Context;
 use inner_future::{fs::create_dir_all, io::AsyncWriteExt};
@@ -8,8 +8,61 @@ use tracing::*;
 
 use super::{
     structs::{AssetIndexes, VersionManifest},
-    DownloadSource, Downloader,
+    timeout_after, DownloadSource, Downloader,
 };
+
+/// 客户端 JAR 单源的有界等待时间（体积最大，留足慢速网络的余量）
+const JAR_SOURCE_TIMEOUT: Duration = Duration::from_secs(300);
+/// 依赖库/资源对象单源的有界等待时间
+///
+/// 正常网络下远小于该值；只有镜像源不可达（TCP 连接停在 SYN-SENT）时才会触发。
+const ASSET_SOURCE_TIMEOUT: Duration = Duration::from_secs(120);
+/// 元数据（版本清单、资源索引）单源的有界等待时间
+const META_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 依次尝试各下载源，每个源限时等待，超时/失败后继续下一个源
+///
+/// 直接复用 [`crate::http::download`] 的单源重试与临时文件语义，只是给
+/// 每个源套一层超时，避免不可达镜像让整个任务永久挂起（见
+/// [`super::timeout_after`] 的说明）。
+async fn download_with_sources(
+    uris: &[String],
+    dest: &str,
+    per_source: Duration,
+) -> DynResult {
+    let mut last_err = None;
+    for uri in uris {
+        match timeout_after(
+            per_source,
+            crate::http::download(std::slice::from_ref(uri), dest, 0),
+        )
+        .await
+        {
+            Some(Ok(())) => return Ok(()),
+            Some(Err(err)) => {
+                warn!("从 {} 下载 {} 失败：{:?}", uri, dest, err);
+                last_err = Some(err);
+            }
+            None => {
+                warn!("从 {} 下载 {} 超时，尝试下一个下载源", uri, dest);
+                last_err = Some(anyhow::anyhow!("下载 {} 超时", uri));
+            }
+        }
+        // 重复的库条目会并发下载同一目标（1.5.2 的 jinput-platform 就有两条），
+        // 另一任务 rename 成功会让本任务的临时文件消失并报 ENOENT。仅在
+        // 「错误是 NotFound 且目标文件已存在」时视为本次补全已完成，避免把
+        // 真正的下载失败或残留损坏文件误判为成功。
+        let not_found = last_err
+            .as_ref()
+            .and_then(|err| err.downcast_ref::<std::io::Error>())
+            .map(|err| err.kind() == std::io::ErrorKind::NotFound)
+            .unwrap_or(false);
+        if not_found && std::path::Path::new(dest).is_file() {
+            return Ok(());
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("没有可用的下载源")))
+}
 use crate::{
     download::VersionInfo,
     prelude::*,
@@ -66,7 +119,7 @@ pub trait VanillaDownloadExt: Sync {
 
 impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
     async fn get_avaliable_vanilla_versions(&self) -> DynResult<VersionManifest> {
-        let res = crate::http::retry_get_json(match self.source {
+        let uri = match self.source {
             DownloadSource::Default => {
                 "https://piston-meta.mojang.com/mc/game/version_manifest.json"
             }
@@ -75,8 +128,11 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             }
             DownloadSource::MCBBS => "https://download.mcbbs.net/mc/game/version_manifest.json",
             _ => "https://piston-meta.mojang.com/mc/game/version_manifest.json",
-        })
-        .await
+        };
+        let res = match timeout_after(META_TIMEOUT, crate::http::retry_get_json(uri)).await {
+            Some(res) => res,
+            None => anyhow::bail!("获取可用原版列表超时：{uri}"),
+        }
         .map_err(|e| anyhow::anyhow!("获取可用原版列表失败：{:?}", e))?;
         Ok(res)
     }
@@ -126,7 +182,7 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             format!("https://download.mcbbs.net{}", path.path()),
             format!("https://launcher.mojang.com{}", path.path()),
         ];
-        crate::http::download(&uris, save_path, 0)
+        download_with_sources(&uris, save_path, JAR_SOURCE_TIMEOUT)
             .await
             .map_err(|e| anyhow::anyhow!("下载原版游戏 Jar 失败：{:?}", e))?;
         r.add_progress(1.);
@@ -178,7 +234,7 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             format!("https://download.mcbbs.net/maven/{path}"),
             format!("https://libraries.minecraft.net/{path}"),
         ];
-        crate::http::download(&default_uris, &full_path, 0)
+        download_with_sources(&default_uris, &full_path, ASSET_SOURCE_TIMEOUT)
             .await
             .map_err(|e| anyhow::anyhow!("下载库 {} 失败：{:?}", path, e))?;
         r.add_progress(1.);
@@ -222,7 +278,13 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             format!("https://launchermeta.mojang.com{p}"),
         ];
         for uri in &uris {
-            let res = crate::http::retry_get_bytes(uri).await;
+            let res = match timeout_after(META_TIMEOUT, crate::http::retry_get_bytes(uri)).await {
+                Some(res) => res,
+                None => {
+                    warn!("获取资源索引 {name} 超时：{uri}");
+                    continue;
+                }
+            };
             if let Ok(res) = res {
                 inner_future::fs::write(full_path, &res).await?;
                 return Ok(serde_json::from_slice(&res)?);
@@ -291,7 +353,7 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             format!("https://download.mcbbs.net/assets/{sub_hash}/{sha1}"),
             format!("https://resources.download.minecraft.net/{sub_hash}/{sha1}"),
         ];
-        crate::http::download(&uris, &full_path, 0)
+        download_with_sources(&uris, &full_path, ASSET_SOURCE_TIMEOUT)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -609,13 +671,16 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
         let url = version_info.url.parse::<url::Url>()?;
         let url_path = url.path();
 
-        let res = crate::http::retry_get_bytes(match self.source {
+        let meta_uri = match self.source {
             DownloadSource::Default => format!("https://launchermeta.mojang.com{url_path}"),
             DownloadSource::BMCLAPI => format!("https://bmclapi2.bangbang93.com{url_path}"),
             DownloadSource::MCBBS => format!("https://download.mcbbs.net{url_path}"),
             _ => format!("https://launchermeta.mojang.com{url_path}"),
-        })
-        .await
+        };
+        let res = match timeout_after(META_TIMEOUT, crate::http::retry_get_bytes(&meta_uri)).await {
+            Some(res) => res,
+            None => anyhow::bail!("下载版本元数据超时：{meta_uri}"),
+        }
         .map_err(|e| anyhow::anyhow!("下载版本元数据失败：{:?}", e))?;
 
         inner_future::fs::write(&version_file, &res).await?;

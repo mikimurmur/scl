@@ -179,7 +179,7 @@ pub async fn refresh_auth(am: &mut AuthMethod, client_token: &str) -> DynResult<
             // TODO: 增加正确的检测方式
             let profile_resp =
                 crate::http::get("https://api.minecraftservices.com/minecraft/profile")
-                    .header("Authorization", &format!("Bearer {}", &access_token))
+                    .header("Authorization", format!("Bearer {}", access_token))
                     .await
                     .map_err(|e| {
                         anyhow::anyhow!("发送用户信息请求失败，有可能是网络问题：{:?}", e)

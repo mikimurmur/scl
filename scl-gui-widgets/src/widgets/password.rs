@@ -152,12 +152,10 @@ impl Widget<String> for PasswordBox {
                     }
                 }
             }
-            druid::Event::Notification(cmd) => {
-                if cmd.is(TextComponent::TAB) {
-                    ctx.focus_next();
-                    ctx.request_paint();
-                    ctx.set_handled();
-                }
+            druid::Event::Notification(cmd) if cmd.is(TextComponent::TAB) => {
+                ctx.focus_next();
+                ctx.request_paint();
+                ctx.set_handled();
             }
             _ => {}
         }

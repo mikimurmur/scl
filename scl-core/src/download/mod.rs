@@ -12,7 +12,7 @@ pub mod quiltmc;
 pub mod structs;
 pub mod vanilla;
 
-use std::{fmt::Display, path::Path, str::FromStr};
+use std::{fmt::Display, path::Path, str::FromStr, time::Duration};
 
 use anyhow::Context;
 pub use authlib::AuthlibDownloadExt;
@@ -27,12 +27,32 @@ pub use vanilla::VanillaDownloadExt;
 use self::structs::VersionInfo;
 use crate::{path::*, prelude::*, progress::*};
 
+/// 对一次网络操作施加兜底超时，超时返回 `None`
+///
+/// `surf` 的 h1 客户端（async-h1）只在 HTTP 握手阶段套用 `Config::timeout`，
+/// 真正建立 TCP 连接时是裸 `TcpStream::connect`，没有超时（http-client 6.5.3
+/// `h1/mod.rs` 中 `connect` 位于 timeout 包裹之外）。镜像源返回的 302 跳转
+/// 目标一旦不可达，连接会一直停在 SYN-SENT，整个下载任务（含修复任务）随之
+/// 永久挂起。这里给每个源一次有界等待，超时后继续尝试下一个源，保证任务
+/// 在失败时也能收敛。
+pub(crate) async fn timeout_after<F>(duration: Duration, future: F) -> Option<F::Output>
+where
+    F: std::future::Future,
+{
+    let timeout = async {
+        smol::Timer::after(duration).await;
+        None
+    };
+    smol::future::or(async { Some(future.await) }, timeout).await
+}
+
 /// 游戏的下载来源，支持和 BMCLAPI 同格式的自定义镜像源
 ///
 /// 通常国内的镜像源速度是比官方快的，但是更新不如官方的及时
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum DownloadSource {
     /// 全部使用原始来源下载
+    #[default]
     Default,
     /// 全部使用 BMCLAPI 提供的镜像源下载
     ///
@@ -42,12 +62,6 @@ pub enum DownloadSource {
     MCBBS,
     /// 使用符合 BMCLAPI 镜像链接格式的自定义镜像源下载
     Custom(url::Url),
-}
-
-impl Default for DownloadSource {
-    fn default() -> Self {
-        Self::Default
-    }
 }
 
 impl Display for DownloadSource {
@@ -359,5 +373,38 @@ impl<R: Reporter> GameDownload for Downloader<R> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use std::time::{Duration, Instant};
+
+    use super::timeout_after;
+
+    /// 永远不完成的网络操作必须在超时后返回 `None`，否则下载/修复任务
+    /// 会永久停在不可达镜像源的 TCP 连接上（A 缺陷的根因）。
+    #[test]
+    fn timeout_after_bounds_pending_future() {
+        let start = Instant::now();
+        let result = smol::block_on(timeout_after(
+            Duration::from_millis(50),
+            std::future::pending::<()>(),
+        ));
+        assert!(result.is_none(), "未完成的 future 应被超时取消");
+        assert!(
+            start.elapsed() >= Duration::from_millis(40),
+            "应至少等待到超时时刻"
+        );
+    }
+
+    /// 正常完成的 future 原样返回结果，不受超时影响。
+    #[test]
+    fn timeout_after_returns_completed_value() {
+        let result = smol::block_on(timeout_after(
+            Duration::from_millis(500),
+            async { 42 },
+        ));
+        assert_eq!(result, Some(42));
     }
 }

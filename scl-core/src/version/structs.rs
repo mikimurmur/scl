@@ -432,16 +432,16 @@ impl VersionInfo {
         if version_base_path.is_dir() {
             let jar_path = version_base_path
                 .join(&self.version)
-                .join(format!("{}.jar", &self.version));
+                .join(format!("{}.jar", self.version));
             let meta_path = version_base_path
                 .join(&self.version)
-                .join(format!("{}.json", &self.version));
+                .join(format!("{}.json", self.version));
             let scl_config_path = version_base_path.join(&self.version).join(".scl.json");
             if !meta_path.is_file() {
                 anyhow::bail!(
                     "该版本 {} （游戏文件夹：{}） 缺失元数据文件",
-                    &self.version,
-                    &self.version_base
+                    self.version,
+                    self.version_base
                 )
             } else {
                 if scl_config_path.is_file() {
@@ -472,7 +472,7 @@ impl VersionInfo {
                 Ok(())
             }
         } else {
-            anyhow::bail!("游戏文件夹 {} 不是正确的文件夹", &self.version_base)
+            anyhow::bail!("游戏文件夹 {} 不是正确的文件夹", self.version_base)
         }
     }
 
@@ -521,7 +521,7 @@ impl VersionInfo {
         if version_base_path.is_dir() {
             let meta_path = version_base_path
                 .join(&self.version)
-                .join(format!("{}.json", &self.version));
+                .join(format!("{}.json", self.version));
             let scl_config_path = version_base_path.join(&self.version).join(".scl.json");
             // 这个不是刚需了
             // if !jar_path.is_file() {

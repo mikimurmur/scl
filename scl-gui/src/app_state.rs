@@ -216,6 +216,8 @@ pub struct AppState {
     pub setting_about_update_logs: Option<String>,
     /// 设置页面中手动添加 Java 时输入的路径
     pub setting_java_manual_path: String,
+    /// Java 运行时扫描后的界面提示（有候选解析失败时非空）
+    pub java_scan_message: Option<String>,
 
     /// 启动游戏时的提示
     pub starting_tip: Option<String>,
@@ -406,9 +408,22 @@ impl AppState {
             .collect();
     }
 
+    /// 内存输入框的初始文本。
+    ///
+    /// 自动内存时配置里的 `mem_size` 是 0，直接回填会显示成真实文本 "0"，
+    /// 用户输入 2048 就变成 "02048"（问题 ⑦）。自动模式留空以显示占位符，
+    /// 手动模式才回填已保存的数值。
+    fn initial_memory_input(config: &Config) -> String {
+        if config.auto_mem_size {
+            String::new()
+        } else {
+            config.mem_size.to_string()
+        }
+    }
+
     /// 使用配置创建一个新的全局状态
     pub fn new(config: Config) -> Self {
-        let memory_size_str = config.mem_size.to_string();
+        let memory_size_str = Self::initial_memory_input(&config);
         Self {
             config,
             versions: Vector::new(),
@@ -419,6 +434,7 @@ impl AppState {
             setting_launch_java_memory_size: memory_size_str,
             setting_about_update_logs: None,
             setting_java_manual_path: String::new(),
+            java_scan_message: None,
             starting_tip: None,
             launch_window_ready: false,
             launch_error_logs: Vector::new(),
@@ -708,7 +724,7 @@ pub fn apply_mock(state: &mut AppState) {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    state.setting_launch_java_memory_size = state.config.mem_size.to_string();
+    state.setting_launch_java_memory_size = AppState::initial_memory_input(&state.config);
     state.setting_about_update_logs =
         Some("SCL 1.2.0\n- 修复了一些已知问题\n- 优化了下载速度\n- 支持 NeoForge 安装".into());
     state.update_logs = state.setting_about_update_logs.clone();
@@ -874,4 +890,34 @@ pub fn apply_mock(state: &mut AppState) {
     state.launch_error = Some("启动失败：未找到有效的 Java 运行时".into());
     state.config.minecraft_folder = crate::config::MinecraftFolder::CurrentDirectory;
     state.config.minecraft_folders = im::Vector::new();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppState;
+    use crate::config::Config;
+
+    #[test]
+    fn auto_memory_leaves_input_empty_for_placeholder() {
+        // 问题 ⑦：自动内存时 mem_size 是 0，输入框不能把 "0" 当真实文本显示。
+        let config = Config::default();
+        assert!(config.auto_mem_size);
+        assert_eq!(AppState::initial_memory_input(&config), "");
+        assert_eq!(
+            AppState::new(config).setting_launch_java_memory_size,
+            ""
+        );
+    }
+
+    #[test]
+    fn manual_memory_restores_saved_value() {
+        let mut config = Config::default();
+        config.auto_mem_size = false;
+        config.mem_size = 2048;
+        assert_eq!(AppState::initial_memory_input(&config), "2048");
+        assert_eq!(
+            AppState::new(config).setting_launch_java_memory_size,
+            "2048"
+        );
+    }
 }

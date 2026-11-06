@@ -152,8 +152,13 @@ pub const SELECT_MOD_INSTALL_VERSION: Selector<String> =
 pub enum AppEvent {
     /// 扫描到所有本地版本
     VersionsLoaded(Vec<LocalVersionInfo>),
-    /// 扫描到所有 Java 运行时
-    JavaLoaded(Vec<crate::config::JavaRuntimeInfo>),
+    /// 扫描到所有 Java 运行时（含无法解析的候选数量）
+    JavaLoaded {
+        /// 成功识别的运行时
+        javas: Vec<crate::config::JavaRuntimeInfo>,
+        /// 无法解析的候选数量
+        failed: usize,
+    },
     /// 添加了一个 Java 运行时
     JavaAdded(crate::config::JavaRuntimeInfo),
     /// 原版版本列表加载完成
@@ -822,8 +827,11 @@ impl AppWrapper {
                     ctx.submit_command(START_GAME.with(()).to(Target::Global));
                 }
             }
-            AppEvent::JavaLoaded(javas) => {
+            AppEvent::JavaLoaded { javas, failed } => {
+                let loaded = javas.len();
                 java::merge_java_list(data, javas);
+                // 问题 ⑤：解析失败的候选不能只写日志，页面上要给出可见反馈。
+                data.java_scan_message = java::scan_notice(loaded, failed);
             }
             AppEvent::JavaAdded(info) => {
                 java::add_java(data, info);
@@ -1334,6 +1342,10 @@ impl AppWrapper {
                     data.login_microsoft_url.clear();
                     data.login_error = None;
                     data.login_busy = false;
+                } else if *page == PAGE_LOGIN_AUTHLIB {
+                    // 问题 ④：错误状态下返回登录方式页再进来时，旧错误文案不应残留。
+                    data.login_error = None;
+                    data.login_busy = false;
                 } else if *page == PAGE_VERSION_SETTING {
                     // 官方在该页弹出时后台保存版本设置（含重命名）。
                     version_setting::on_app_pop_page(ctx, data);
@@ -1412,6 +1424,11 @@ impl AppWrapper {
                 }
             }
             PAGE_LOGIN_AUTHLIB => {
+                // 每次重新进入页面都从干净的错误态开始（pop 回退时保留上一次
+                // 成功/失败结果的做法会让旧错误文案跨导航残留，问题 ④）。
+                if !is_pop {
+                    data.login_error = None;
+                }
                 // 端到端测试钩子：SCL_AUTO_AUTHLIB_LOGIN=<服务器,用户名,密码>
                 // 自动填表提交，配合本地 mock authlib 服务器验证多角色选择页流程。
                 if let Some(spec) = std::env::var_os("SCL_AUTO_AUTHLIB_LOGIN") {

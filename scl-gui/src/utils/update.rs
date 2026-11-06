@@ -24,12 +24,38 @@ fn normalize_version(version: &str) -> String {
         .to_owned()
 }
 
+/// 判断响应体是否像一个版本号。
+///
+/// 更新源被 WAF/CDN 拦截时会返回整页 HTML 或错误文案（官方不校验，
+/// OB-17 的恶性表现，已按用户指令转为修复，见 DEV-12），这里按
+/// 「纯版本号」形态校验：非空、长度合理、仅含 semver 常见字符。
+fn is_version_like(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 64
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+' | '_'))
+}
+
 /// 获取最新版本号
 pub fn latest_version() -> anyhow::Result<String> {
     let mut last_error = None;
     for url in UPDATE_URLS {
-        match scl_core::http::retry_get_string(url) {
-            Ok(text) => {
+        match scl_core::http::retry_get(url) {
+            Ok(response) => {
+                // 不校验状态码会把 WAF/CDN 拦截页当版本号（OB-17 表现），先验状态码
+                if !response.is_success() {
+                    tracing::error!("无法获取最新版本号：{url} 返回了非成功的状态码 {}", response.status());
+                    last_error =
+                        Some(anyhow::anyhow!("{url} 返回了非成功的状态码 {}", response.status()));
+                    continue;
+                }
+                let Ok(text) = response.into_string() else {
+                    let err = anyhow::anyhow!("{url} 响应体无法按文本解码");
+                    tracing::error!("无法获取最新版本号：{err}");
+                    last_error = Some(err);
+                    continue;
+                };
                 let trimmed = text.trim();
                 // 恢复版额外兼容 GitHub Release JSON（官方 1.2.0 只认纯文本）；
                 // 解析成功时仍返回干净的版本号，避免正常路径回归。
@@ -38,9 +64,14 @@ pub fn latest_version() -> anyhow::Result<String> {
                         return Ok(normalize_version(&release.tag_name));
                     }
                 }
-                if !trimmed.is_empty() {
-                    return Ok(trimmed.to_owned());
+                // 响应体必须形如版本号：拦截页/错误页 HTML 一律视为失败并换下一个源
+                if !is_version_like(trimmed) {
+                    tracing::error!("无法获取最新版本号：{url} 返回了非版本号内容（可能被网络拦截），已忽略");
+                    last_error =
+                        Some(anyhow::anyhow!("{url} 返回了非版本号内容（可能被网络拦截）"));
+                    continue;
                 }
+                return Ok(trimmed.to_owned());
             }
             Err(err) => {
                 tracing::error!("无法获取最新版本号：{url}");
@@ -237,4 +268,37 @@ pub fn run_post_updater(args: &[String]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_version_like, normalize_version};
+
+    #[test]
+    fn accepts_plain_version_strings() {
+        assert!(is_version_like("1.2.0"));
+        assert!(is_version_like("26.2"));
+        assert!(is_version_like("1.21.8"));
+        assert!(is_version_like("v1.2.3"));
+        assert!(is_version_like("SCL-1.2.0"));
+        assert!(is_version_like("1.2.3+build.5"));
+    }
+
+    #[test]
+    fn rejects_html_and_message_payloads() {
+        // 更新源被 WAF/CDN 拦截时返回的 HTML 不能再被当成版本号渲染（问题 ②）。
+        assert!(!is_version_like(
+            "<!DOCTYPE html><html><body>400 Bad Request</body></html>"
+        ));
+        assert!(!is_version_like("error: request blocked"));
+        assert!(!is_version_like(""));
+        assert!(!is_version_like(&"9".repeat(65)));
+    }
+
+    #[test]
+    fn normalizes_v_and_scl_prefixes() {
+        assert_eq!(normalize_version(" v1.2.3\n"), "1.2.3");
+        assert_eq!(normalize_version("SCL-1.2.0"), "1.2.0");
+        assert_eq!(normalize_version("26.2"), "26.2");
+    }
 }

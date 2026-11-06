@@ -16,8 +16,8 @@ pub fn check_update(ctx: &EventCtx, data: &mut AppState) {
         match update::latest_version() {
             Ok(version) => {
                 // 官方关于页检查更新只请求 latest 并立刻把整段响应体当作版本号，
-                // 不等待更新记录拉取；先提交版本让关于页立即收敛（Cloudflare
-                // 拦截页 HTML 也原样展示），更新记录随后在后台补上。
+                // 不等待更新记录拉取；先提交版本让关于页立即收敛（非版本号内容
+                // 已在 latest_version 校验拒绝，见 DEV-12），更新记录随后在后台补上。
                 let _ = sink.submit_command(
                     APP_EVENT,
                     AppEvent::UpdateChecked(Ok((version.clone(), String::new()))),

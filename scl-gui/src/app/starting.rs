@@ -35,23 +35,38 @@ pub fn load_java(sink: ExtEventSink) {
         if candidates.is_empty() {
             candidates.push("java".into());
         }
+        // PATH 中的重复目录会让同一个可执行文件被扫描多次。
+        candidates.sort();
+        candidates.dedup();
         let mut result = Vec::new();
+        let mut failed = 0usize;
         for path in candidates {
-            if let Ok(runtime) = JavaRuntime::from_java_path(&path) {
-                result.push(JavaRuntimeInfo {
+            match JavaRuntime::from_java_path(&path) {
+                Ok(runtime) => result.push(JavaRuntimeInfo {
                     path: runtime.path().to_owned(),
                     name: format!("Java {} ({})", runtime.version(), runtime.main_version()),
                     version: runtime.version().to_owned(),
                     is_64bit: runtime.is_64bit(),
                     main_version: runtime.main_version(),
-                });
+                }),
+                Err(err) => {
+                    failed += 1;
+                    tracing::error!("无法解析 Java 运行时 {path}: {err}");
+                }
             }
         }
         result.sort_by_key(|a| a.main_version);
         // 同一个 Java 8+/16+ PATH 项 path 相同，不能只按 path 去重，
         // 否则扫描后默认的 8+/16+ 两条会合并成一条。
         result.dedup_by(|a, b| a.is_same_rt(b));
-        let _ = sink.submit_command(APP_EVENT, AppEvent::JavaLoaded(result), Target::Global);
+        let _ = sink.submit_command(
+            APP_EVENT,
+            AppEvent::JavaLoaded {
+                javas: result,
+                failed,
+            },
+            Target::Global,
+        );
         Ok(())
     });
 }

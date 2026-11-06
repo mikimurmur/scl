@@ -150,6 +150,17 @@ fn parse_inheritsed_meta(cfg: &ClientConfig) -> VersionMeta {
     }
 }
 
+/// 获取启动参数中的 XUID。
+///
+/// 只有微软账户携带真实 XUID；离线、Mojang 与 Authlib 账户没有该值，
+/// 统一用 `"0"` 代替，避免 `${auth_xuid}` 占位符原样传给游戏（问题 ⑧）。
+fn auth_xuid(auth: &AuthMethod) -> String {
+    match auth {
+        AuthMethod::Microsoft { xuid, .. } if !xuid.is_empty() => xuid.to_owned(),
+        _ => "0".to_owned(),
+    }
+}
+
 impl Client {
     /// 根据传入的启动客户端版本设定创建一个客户端
     ///
@@ -366,6 +377,7 @@ impl Client {
                 AuthMethod::AuthlibInjector { uuid, .. } => uuid.to_owned(),
             },
         );
+        variables.insert("${auth_xuid}", auth_xuid(&cfg.auth));
         variables.insert(
             "${user_type}",
             match &cfg.auth {
@@ -687,5 +699,66 @@ impl Display for Client {
             "idle"
         };
         write!(f, "[MCClient {} args={:?}]", running, self.args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auth_xuid;
+    use crate::{auth::structs::AuthMethod, password::Password};
+
+    fn microsoft(xuid: &str) -> AuthMethod {
+        AuthMethod::Microsoft {
+            access_token: Password::from("access-token"),
+            refresh_token: Password::from("refresh-token"),
+            uuid: "00000000000000000000000000000000".into(),
+            xuid: xuid.into(),
+            player_name: "player".into(),
+            head_skin: Vec::new(),
+            hat_skin: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn non_microsoft_accounts_use_zero_xuid() {
+        // 离线、Mojang、Authlib 账户没有 XUID，`${auth_xuid}` 必须被替换成 "0"
+        // 而不是原样传给游戏（问题 ⑧）。
+        assert_eq!(
+            auth_xuid(&AuthMethod::Offline {
+                player_name: "player".into(),
+                uuid: "00000000000000000000000000000000".into(),
+            }),
+            "0"
+        );
+        assert_eq!(
+            auth_xuid(&AuthMethod::Mojang {
+                access_token: Password::from("token"),
+                uuid: "00000000000000000000000000000000".into(),
+                player_name: "player".into(),
+                head_skin: Vec::new(),
+                hat_skin: Vec::new(),
+            }),
+            "0"
+        );
+        assert_eq!(
+            auth_xuid(&AuthMethod::AuthlibInjector {
+                api_location: "https://example.com".into(),
+                server_name: "server".into(),
+                server_homepage: String::new(),
+                server_meta: String::new(),
+                access_token: Password::from("token"),
+                uuid: "00000000000000000000000000000000".into(),
+                player_name: "player".into(),
+                head_skin: Vec::new(),
+                hat_skin: Vec::new(),
+            }),
+            "0"
+        );
+    }
+
+    #[test]
+    fn microsoft_accounts_use_real_xuid_with_zero_fallback() {
+        assert_eq!(auth_xuid(&microsoft("2535401234567890")), "2535401234567890");
+        assert_eq!(auth_xuid(&microsoft("")), "0");
     }
 }

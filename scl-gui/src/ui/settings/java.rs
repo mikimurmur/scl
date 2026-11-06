@@ -4,13 +4,18 @@ use druid::{
     commands,
     kurbo::BezPath,
     piet::{Text, TextLayout, TextLayoutBuilder},
-    widget::{Click, ControllerHost, CrossAxisAlignment, Flex, List, Scroll},
-    BoxConstraints, Env, Event, FileDialogOptions, LayoutCtx, LensExt, LifeCycle, LifeCycleCtx,
-    PaintCtx, RenderContext, Size, Widget, WidgetExt,
+    widget::{
+        Click, ControllerHost, CrossAxisAlignment, Flex, List, Scroll, SizedBox, ViewSwitcher,
+    },
+    BoxConstraints, Env, Event, FileDialogOptions, Insets, LayoutCtx, LensExt, LifeCycle,
+    LifeCycleCtx, PaintCtx, RenderContext, Size, Widget, WidgetExt,
 };
-use scl_gui_widgets::theme::{
-    color::{base, typography},
-    icons::IconKeyPair,
+use scl_gui_widgets::{
+    theme::{
+        color::{base, main, typography},
+        icons::IconKeyPair,
+    },
+    widgets::label,
 };
 
 use crate::{
@@ -159,13 +164,29 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
         },
     );
 
+    // 问题 ⑤：扫描候选解析失败时给出可见反馈，而不是只写日志。
+    let scan_message = ViewSwitcher::new(
+        |data: &AppState, _env: &Env| data.java_scan_message.clone(),
+        |message: &Option<String>, _data: &AppState, _env: &Env| -> Box<dyn Widget<AppState>> {
+            match message {
+                Some(text) => Box::new(
+                    label::new(text.clone())
+                        .with_text_color(main::PRIMARY)
+                        .padding(Insets::new(14., 8., 14., 8.)),
+                ),
+                None => Box::new(SizedBox::empty()),
+            }
+        },
+    );
+
     // 注意：外层会再套一次 Scroll，因此这里不能再使用 flex child，
     // 否则 Flex 在无限高度约束下会告警并把 List 撑到无限高。
     let content = Flex::column()
         .cross_axis_alignment(CrossAxisAlignment::Fill)
         .with_child(list)
         .with_child(add_row)
-        .with_child(search_row);
+        .with_child(search_row)
+        .with_child(scan_message);
 
     // 只在外层 column 上滚动一次；不要再嵌套 Scroll::new(list)。
     Box::new(Scroll::new(content).vertical().expand_width().boxed())

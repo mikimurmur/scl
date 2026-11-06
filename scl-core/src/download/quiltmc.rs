@@ -11,7 +11,12 @@ pub struct LoaderMetaItem {
     /// QuiltMC 加载器的元数据
     pub loader: LoaderStruct,
     /// 源码对照表的元数据
-    pub intermediary: IntermediaryStruct,
+    ///
+    /// QuiltMC v3 接口对新版 MC（实测 26.2 起）的版本条目已不再返回此字段，
+    /// 按当前上游形态改为可选；安装流程使用 profile/json 接口，
+    /// 界面仅读取 [`LoaderStruct::version`]，均不依赖本字段。
+    #[serde(default)]
+    pub intermediary: Option<IntermediaryStruct>,
 }
 
 /// 源码对照表的信息
@@ -179,5 +184,42 @@ impl<R: Reporter> QuiltMCDownloadExt for Downloader<R> {
         fs_err::write(&vanilla_path, serde_json::to_vec(&vanilla_meta)?)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LoaderMetaItem;
+
+    /// QuiltMC v3 接口对新版 Minecraft 已不再返回 `intermediary`
+    /// （问题 ③ / 事务 T-21），解析不能因此整体失败。
+    #[test]
+    fn parses_loader_meta_without_intermediary() {
+        let body = r#"{
+            "loader": {
+                "maven": "org.quiltmc:quilt-loader:0.27.1",
+                "version": "0.27.1"
+            }
+        }"#;
+        let item: LoaderMetaItem = serde_json::from_str(body).expect("缺少 intermediary 应能解析");
+        assert_eq!(item.loader.version, "0.27.1");
+        assert!(item.intermediary.is_none());
+    }
+
+    #[test]
+    fn still_parses_intermediary_when_present() {
+        let body = r#"{
+            "loader": {
+                "maven": "org.quiltmc:quilt-loader:0.20.0",
+                "version": "0.20.0"
+            },
+            "intermediary": {
+                "maven": "net.fabricmc:intermediary:1.20.1",
+                "version": "1.20.1"
+            }
+        }"#;
+        let item: LoaderMetaItem = serde_json::from_str(body).expect("应能解析完整条目");
+        let intermediary = item.intermediary.expect("intermediary 应被保留");
+        assert_eq!(intermediary.version, "1.20.1");
     }
 }

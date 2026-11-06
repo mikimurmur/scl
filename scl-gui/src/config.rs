@@ -485,11 +485,14 @@ fn java_main_version(version: &str) -> u8 {
 }
 
 impl JavaRuntimeInfo {
-    /// 判断两个 Java 运行时是否相同
+    /// 判断两个 Java 运行时是否是同一项。
+    ///
+    /// 配置文件的 `version` 字段只持久化主版本号（见 [`Serialize`] 实现），
+    /// 回读后是 "21"，而重新扫描得到的是完整版本号 "21.0.11"；把完整版本号
+    /// 纳入比较会让同一个运行时在每次扫描后都被当成新条目累积（问题 ⑩）。
+    /// 因此以「可执行文件路径 + 主版本号」作为身份键，完整版本号只用于展示。
     pub fn is_same_rt(&self, other: &Self) -> bool {
-        self.path == other.path
-            && self.version == other.version
-            && self.main_version == other.main_version
+        self.path == other.path && self.main_version == other.main_version
     }
 }
 

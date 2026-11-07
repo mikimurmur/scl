@@ -2,7 +2,6 @@
 use std::{
     io::{BufRead, Read, Write},
     process::Stdio,
-    sync::atomic::AtomicBool,
     time::{Duration, Instant},
 };
 
@@ -17,15 +16,6 @@ use crate::{
     },
     prelude::*,
 };
-
-const FORGE_INSTALL_HELPER: &[u8] = include_bytes!("../../assets/forge-install-bootstrapper.jar");
-
-#[cfg(target_os = "windows")]
-const CLASS_PATH_SPAREATOR: &str = ";";
-#[cfg(target_os = "linux")]
-const CLASS_PATH_SPAREATOR: &str = ":";
-#[cfg(target_os = "macos")]
-const CLASS_PATH_SPAREATOR: &str = ":";
 
 /// Forge 模组加载器的安装特质
 ///
@@ -363,18 +353,6 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
             Ok(())
         } else {
             // 新版本均使用安装器安装
-
-            // Install helper
-            let installer_path = format!(
-                "{}/com/bangbang93/forge-install-bootstrapper/0.0.0/forge-install-bootstrapper.jar",
-                self.minecraft_library_path.as_str()
-            );
-
-            fs_err::create_dir_all(std::path::Path::new(&installer_path).parent().unwrap())?;
-            fs_err::write(&installer_path, FORGE_INSTALL_HELPER)?;
-
-            // TODO: 换成自己的安装代码
-            // Run installer
             let full_path = format!(
                 "{root}/net/minecraftforge/forge/{mc}-{forge}/forge-{mc}-{forge}-installer.jar",
                 root = self.minecraft_library_path.as_str(),
@@ -422,21 +400,23 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
             cmd.stderr(Stdio::inherit());
             cmd.stdin(Stdio::null());
 
+            // 使用安装器自身声明的入口类执行无头安装。
+            // 旧实现依赖内置 bootstrapper 反射调用固定的 main 签名，安装器升级后
+            // 会因参数类型不匹配而失败；`--installClient` 是安装器长期支持的稳定入口。
+            let main_class = super::installer_main_class(&full_path)?;
+
             cmd.arg("-cp");
-            cmd.arg(format!(
-                "{}{}{}",
-                installer_path, CLASS_PATH_SPAREATOR, tmp_full_path
-            ));
-            cmd.arg("com.bangbang93.ForgeInstaller");
+            cmd.arg(&tmp_full_path);
+            cmd.arg(main_class);
+            cmd.arg("--installClient");
             cmd.arg(self.minecraft_path.as_str()); // 安装位置
 
             r.add_progress(1.);
             r.set_message("运行 Forge 安装器安装 Forge".into());
 
-            tracing::trace!("Start running installer bootstrapper {cmd:?}");
+            tracing::trace!("Start running installer {cmd:?}");
 
             let mut child = cmd.spawn()?;
-            let install_succeed = AtomicBool::new(false);
 
             let ir = r.fork();
             ir.set_message("这需要一点时间……".into());
@@ -483,8 +463,6 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
                                 ir.set_message("正在合并源码对照表".into());
                             } else if line == "Injecting profile" {
                                 ir.set_message("正在注入版本元数据".into());
-                            } else if line == "true" {
-                                install_succeed.store(true, std::sync::atomic::Ordering::SeqCst)
                             }
 
                             if delayed {
@@ -504,17 +482,28 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
             let status = child.wait()?;
             r.add_progress(1.);
             r.remove_progress();
-            fs_err::remove_file(tmp_full_path)?;
-            if status.success() && install_succeed.load(std::sync::atomic::Ordering::SeqCst) {
-                Ok(())
-            } else {
+            fs_err::remove_file(&tmp_full_path)?;
+            if !status.success() {
                 anyhow::bail!(
                     "执行 Forge {}-{} 安装器失败，运行器返回值：{}",
                     version_id,
                     forge_version,
                     status
-                )
+                );
             }
+            let installed_version_json = std::path::Path::new(&self.minecraft_version_path)
+                .join(version_name)
+                .join(format!("{version_name}.json"));
+            if !installed_version_json.is_file() {
+                anyhow::bail!(
+                    "Forge {}-{} 安装器已正常退出（运行器返回值：{}），但未找到版本元数据 {}",
+                    version_id,
+                    forge_version,
+                    status,
+                    installed_version_json.display()
+                );
+            }
+            Ok(())
         }
     }
 
@@ -529,10 +518,21 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
             .context("打开 Forge 安装器时发生错误")?;
         tracing::trace!("Opening file");
         let mut out_file = zip::ZipWriter::new(to_writer);
+        // 安装器会从 install_profile.json 与 version.json 两处读取下载地址，
+        // 只改其中一处会在真实安装时漏掉另一批库。
+        let replace_source = match &self.source {
+            DownloadSource::BMCLAPI => "https://bmclapi2.bangbang93.com/maven".to_owned(),
+            DownloadSource::Custom(base) => {
+                format!("{}/maven", base.as_str().trim_end_matches('/'))
+            }
+            DownloadSource::Default => "https://maven.minecraftforge.net".to_owned(),
+        };
         tracing::trace!("Reading file");
         for index in 0..file.len() {
             if let Ok(mut entry) = file.by_index(index) {
-                if entry.name().starts_with("META-INF") {
+                // 保留清单：NeoForge 安装器会读取自身 JAR 的 Manifest，
+                // 缺失时会直接抛出 NullPointerException。
+                if entry.name().starts_with("META-INF") && entry.name() != "META-INF/MANIFEST.MF" {
                     continue;
                 }
                 if entry.is_file() {
@@ -553,12 +553,6 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
                                         tracing::trace!("已修改 install.target 字段为 {target}");
                                     }
                                 }
-                                let replace_source = match self.source {
-                                    DownloadSource::BMCLAPI => {
-                                        "https://bmclapi2.bangbang93.com/maven"
-                                    }
-                                    _ => "https://files.minecraftforge.net",
-                                };
                                 if let Some(Value::Array(array)) = obj.get_mut("libraries") {
                                     for (i, lib) in array.iter_mut().enumerate() {
                                         if let Value::Object(obj) = lib {
@@ -678,6 +672,29 @@ impl<R: Reporter> ForgeDownloadExt for Downloader<R> {
                                 zip::write::SimpleFileOptions::default(),
                             )?;
                             out_file.write_all(&output)?;
+                        }
+                        "version.json" => {
+                            let mut data = String::with_capacity(entry.size() as usize);
+                            entry.read_to_string(&mut data)?;
+                            let mut version_json: Value = serde_json::from_str(&data)?;
+                            if let Value::Object(obj) = &mut version_json {
+                                if let Some(Value::String(id)) = obj.get_mut("id") {
+                                    *id = name.to_owned();
+                                }
+                            }
+                            super::rewrite_library_urls(
+                                &mut version_json,
+                                &[
+                                    "https://maven.minecraftforge.net",
+                                    "https://files.minecraftforge.net",
+                                ],
+                                &replace_source,
+                            );
+                            out_file.start_file(
+                                entry.name(),
+                                zip::write::SimpleFileOptions::default(),
+                            )?;
+                            out_file.write_all(&serde_json::to_vec_pretty(&version_json)?)?;
                         }
                         _ => {
                             // tracing::trace!("Copied file {}", entry.name());

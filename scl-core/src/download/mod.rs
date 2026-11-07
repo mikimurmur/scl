@@ -14,6 +14,7 @@ pub mod vanilla;
 
 use std::{
     fmt::Display,
+    io::Read,
     path::Path,
     str::FromStr,
     sync::{
@@ -31,6 +32,7 @@ pub use optifine::OptifineDownloadExt;
 pub use quiltmc::QuiltMCDownloadExt;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 pub use vanilla::VanillaDownloadExt;
 
 use self::structs::VersionInfo;
@@ -390,9 +392,10 @@ impl<R: Reporter> GameDownload for Downloader<R> {
             )?;
         }
 
-        // 这俩都需要安装器，而安装后会生成一个新的版本元数据
-        // 因此需要最后扫描一遍生成出来的版本元数据依赖，再进行一次下载
-        if !optifine.is_empty() || !forge.is_empty() {
+        // 这些加载器都依赖安装器，而安装后会生成一个新的版本元数据
+        // 因此需要最后扫描一遍生成出来的版本元数据依赖，再进行一次下载；
+        // 安装器自身下载失败的库（例如 NeoForge 官方 Maven 被网络阻断）由此补齐。
+        if !optifine.is_empty() || !forge.is_empty() || !neoforge.is_empty() {
             let mut version_info = crate::version::structs::VersionInfo {
                 version_base: self.minecraft_version_path.to_owned(),
                 version: version_name.to_owned(),
@@ -411,5 +414,78 @@ impl<R: Reporter> GameDownload for Downloader<R> {
             }
         }
         Ok(())
+    }
+}
+
+/// 读取安装器 JAR 清单声明的入口类。
+///
+/// Forge 与 NeoForge 的安装器都提供 `--installClient` 的无头安装入口；直接调用
+/// 安装器自身的入口类可以避免内置 bootstrapper 依赖固定方法签名。
+pub(crate) fn installer_main_class(jar_path: &str) -> DynResult<String> {
+    let file = fs_err::OpenOptions::new().read(true).open(jar_path)?;
+    let mut archive =
+        zip::ZipArchive::new(file).with_context(|| format!("打开安装器 {jar_path} 时发生错误"))?;
+    let mut manifest = String::new();
+    if let Ok(mut entry) = archive.by_name("META-INF/MANIFEST.MF") {
+        entry.read_to_string(&mut manifest)?;
+    }
+    let main_class = manifest
+        .lines()
+        .find_map(|line| line.strip_prefix("Main-Class:"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("net.minecraftforge.installer.SimpleInstaller");
+    Ok(main_class.to_owned())
+}
+
+/// 把安装器元数据中指向官方 Maven 的库地址改写为指定下载源。
+pub(crate) fn rewrite_library_urls(
+    profile: &mut Value,
+    official_prefixes: &[&str],
+    replace_source: &str,
+) {
+    if let Value::Object(obj) = profile {
+        if let Some(Value::Array(libraries)) = obj.get_mut("libraries") {
+            rewrite_library_array(libraries, official_prefixes, replace_source);
+        }
+        if let Some(Value::Object(version_info)) = obj.get_mut("versionInfo") {
+            if let Some(Value::Array(libraries)) = version_info.get_mut("libraries") {
+                rewrite_library_array(libraries, official_prefixes, replace_source);
+            }
+        }
+    }
+}
+
+fn rewrite_library_array(
+    libraries: &mut [Value],
+    official_prefixes: &[&str],
+    replace_source: &str,
+) {
+    for library in libraries {
+        let Some(obj) = library.as_object_mut() else {
+            continue;
+        };
+        if let Some(Value::Object(downloads)) = obj.get_mut("downloads") {
+            if let Some(Value::Object(artifact)) = downloads.get_mut("artifact") {
+                rewrite_url_field(artifact, official_prefixes, replace_source);
+            }
+        }
+        rewrite_url_field(obj, official_prefixes, replace_source);
+    }
+}
+
+fn rewrite_url_field(
+    obj: &mut serde_json::Map<String, Value>,
+    official_prefixes: &[&str],
+    replace_source: &str,
+) {
+    let Some(Value::String(url)) = obj.get_mut("url") else {
+        return;
+    };
+    if let Some(rest) = official_prefixes
+        .iter()
+        .find_map(|prefix| url.strip_prefix(prefix).map(str::to_owned))
+    {
+        *url = format!("{replace_source}{rest}");
     }
 }

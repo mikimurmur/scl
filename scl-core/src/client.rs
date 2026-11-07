@@ -210,10 +210,21 @@ impl Client {
             let mut lib_args: HashMap<String, String> =
                 HashMap::with_capacity(meta.libraries.len());
             for lib in &meta.libraries {
-                let class_name = lib.name.as_str()
-                    [0..lib.name.rfind(':').expect("Can't parse class name")]
-                    .to_string();
-                if !lib.rules.is_allowed() {
+                // 去重键保留 classifier：Forge 的 universal/client 是同名不同
+                // classifier 的两个必需产物，只保留一个会丢失 forge 系统模组。
+                let mut parts = lib.name.split(':');
+                let group = parts.next().unwrap_or_default();
+                let artifact = parts.next().unwrap_or_default();
+                let classifier = parts.nth(1).unwrap_or_default();
+                let class_name = if classifier.is_empty() {
+                    format!("{group}:{artifact}")
+                } else {
+                    format!("{group}:{artifact}:{classifier}")
+                };
+                // 原生库只解压到 natives 目录供 java.library.path 使用；
+                // 加入 classpath 会让 Forge 的 SecureModuleFinder 把同名
+                // natives jar 视作重复模块并中止启动。
+                if !lib.rules.is_allowed() || lib.name.contains(":natives-") {
                     continue;
                 }
                 let lib_path = {

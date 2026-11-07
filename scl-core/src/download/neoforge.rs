@@ -2,7 +2,6 @@
 use std::{
     io::{BufRead, Read, Write},
     process::Stdio,
-    sync::atomic::AtomicBool,
     time::{Duration, Instant},
 };
 
@@ -14,15 +13,6 @@ use super::{
     Downloader,
 };
 use crate::{download::DownloadSource, prelude::*};
-
-const FORGE_INSTALL_HELPER: &[u8] = include_bytes!("../../assets/forge-install-bootstrapper.jar");
-
-#[cfg(target_os = "windows")]
-const CLASS_PATH_SPAREATOR: &str = ";";
-#[cfg(target_os = "linux")]
-const CLASS_PATH_SPAREATOR: &str = ":";
-#[cfg(target_os = "macos")]
-const CLASS_PATH_SPAREATOR: &str = ":";
 
 /// NeoForge 模组加载器的安装特质
 ///
@@ -144,18 +134,6 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
     ) -> DynResult {
         let r = self.reporter.fork();
         // 新版本均使用安装器安装
-
-        // Install helper
-        let installer_path = format!(
-            "{}/com/bangbang93/forge-install-bootstrapper/0.0.0/forge-install-bootstrapper.jar",
-            self.minecraft_library_path.as_str()
-        );
-
-        fs_err::create_dir_all(std::path::Path::new(&installer_path).parent().unwrap())?;
-        fs_err::write(&installer_path, FORGE_INSTALL_HELPER)?;
-
-        // TODO: 换成自己的安装代码
-        // Run installer
         let full_path = format!(
             "{root}/net/neoforged/neoforge/{mc}-{neoforge}/neoforge-{mc}-{neoforge}-installer.jar",
             root = self.minecraft_library_path.as_str(),
@@ -206,21 +184,22 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
         cmd.stderr(Stdio::inherit());
         cmd.stdin(Stdio::null());
 
+        // 使用安装器自身声明的入口类执行无头安装，避免依赖内置 bootstrapper
+        // 反射调用固定签名的 main 方法。
+        let main_class = super::installer_main_class(&full_path)?;
+
         cmd.arg("-cp");
-        cmd.arg(format!(
-            "{}{}{}",
-            installer_path, CLASS_PATH_SPAREATOR, tmp_full_path
-        ));
-        cmd.arg("com.bangbang93.ForgeInstaller");
+        cmd.arg(&tmp_full_path);
+        cmd.arg(main_class);
+        cmd.arg("--installClient");
         cmd.arg(self.minecraft_path.as_str()); // 安装位置
 
         r.add_progress(1.);
         r.set_message("运行 NeoForge 安装器安装 NeoForge".into());
 
-        tracing::trace!("Start running installer bootstrapper {cmd:?}");
+        tracing::trace!("Start running installer {cmd:?}");
 
         let mut child = cmd.spawn()?;
-        let install_succeed = AtomicBool::new(false);
 
         let ir = r.fork();
         ir.set_message("这需要一点时间……".into());
@@ -266,8 +245,6 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
                             ir.set_message("正在合并源码对照表".into());
                         } else if line == "Injecting profile" {
                             ir.set_message("正在注入版本元数据".into());
-                        } else if line == "true" {
-                            install_succeed.store(true, std::sync::atomic::Ordering::SeqCst)
                         }
 
                         if delayed {
@@ -289,8 +266,6 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
         r.remove_progress();
         fs_err::remove_file(tmp_full_path)?;
         // 安装器返回 0 只代表进程正常退出；是否装好要看产物是否真的落盘。
-        // NeoForge 安装器的 stdout 不保证输出 Forge 安装器那行 "true"，
-        // 因此不能把该标记当作成功的前置条件（否则会误报“安装失败，返回值 0”）。
         let installed_version_json = std::path::Path::new(&self.minecraft_version_path)
             .join(version_name)
             .join(format!("{version_name}.json"));
@@ -313,12 +288,6 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
                 installed_version_json.display()
             );
         }
-        if !install_succeed.load(std::sync::atomic::Ordering::SeqCst) {
-            tracing::debug!(
-                "NeoForge 安装器未输出 true 标记，但退出码为 0 且已找到版本元数据：{}",
-                installed_version_json.display()
-            );
-        }
         Ok(())
     }
 
@@ -333,10 +302,21 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
             .context("打开 NeoForge 安装器时发生错误")?;
         tracing::trace!("Opening file");
         let mut out_file = zip::ZipWriter::new(to_writer);
+        // 安装器从 install_profile.json 下载处理器依赖，从 version.json 下载游戏库；
+        // 两处都要改写，否则真实安装会只完成一半。
+        let replace_source = match &self.source {
+            DownloadSource::BMCLAPI => "https://bmclapi2.bangbang93.com/maven".to_owned(),
+            DownloadSource::Custom(base) => {
+                format!("{}/maven", base.as_str().trim_end_matches('/'))
+            }
+            DownloadSource::Default => "https://maven.neoforged.net/releases".to_owned(),
+        };
         tracing::trace!("Reading file");
         for index in 0..file.len() {
             if let Ok(mut entry) = file.by_index(index) {
-                if entry.name().starts_with("META-INF") {
+                // 保留清单：SimpleInstaller 会读取自身 JAR 的 Manifest，
+                // 缺失时会直接抛出 NullPointerException。
+                if entry.name().starts_with("META-INF") && entry.name() != "META-INF/MANIFEST.MF" {
                     continue;
                 }
                 if entry.is_file() {
@@ -357,12 +337,6 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
                                         tracing::trace!("已修改 install.target 字段为 {target}");
                                     }
                                 }
-                                let replace_source = match self.source {
-                                    DownloadSource::BMCLAPI => {
-                                        "https://bmclapi2.bangbang93.com/maven"
-                                    }
-                                    _ => "https://maven.neoforged.net/releases",
-                                };
                                 if let Some(Value::Array(array)) = obj.get_mut("libraries") {
                                     for (i, lib) in array.iter_mut().enumerate() {
                                         if let Value::Object(obj) = lib {
@@ -464,6 +438,26 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
                                 zip::write::SimpleFileOptions::default(),
                             )?;
                             out_file.write_all(&output)?;
+                        }
+                        "version.json" => {
+                            let mut data = String::with_capacity(entry.size() as usize);
+                            entry.read_to_string(&mut data)?;
+                            let mut version_json: Value = serde_json::from_str(&data)?;
+                            if let Value::Object(obj) = &mut version_json {
+                                if let Some(Value::String(id)) = obj.get_mut("id") {
+                                    *id = name.to_owned();
+                                }
+                            }
+                            super::rewrite_library_urls(
+                                &mut version_json,
+                                &["https://maven.neoforged.net/releases"],
+                                &replace_source,
+                            );
+                            out_file.start_file(
+                                entry.name(),
+                                zip::write::SimpleFileOptions::default(),
+                            )?;
+                            out_file.write_all(&serde_json::to_vec_pretty(&version_json)?)?;
                         }
                         _ => {
                             // tracing::trace!("Copied file {}", entry.name());

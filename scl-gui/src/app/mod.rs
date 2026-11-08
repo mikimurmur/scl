@@ -341,6 +341,13 @@ fn trace_auto_page(action: &str, page: &str, origin: &'static str) {
     tracing::debug!("auto page {action}: page={page:?}, origin={origin}");
 }
 
+/// Esc 触发返回的条件：返回按钮可用、按的是 Esc、且不是按住不放产生的自动重复。
+///
+/// 忽略 `repeat` 保证按住 Esc 不会连续退掉多层页面。
+fn should_back_on_key(back_page_enabled: bool, code: druid::Code, repeat: bool) -> bool {
+    back_page_enabled && code == druid::Code::Escape && !repeat
+}
+
 /// 将配置保存到磁盘
 pub fn save_config(data: &AppState) {
     let cfg = data.config.to_owned();
@@ -464,6 +471,11 @@ pub struct AppWrapper {
     /// 共用同一个 ON_PAGE 选择器）；官方模组搜索页只在 **push** 时清空并
     /// 重载默认列表，返回（pop）时保留搜索词与结果。这里用该标记复刻。
     next_on_page_is_pop: bool,
+    /// 左上角返回按钮当前是否可用。
+    ///
+    /// 与 [`scl_gui_widgets::widgets::ENABLE_BACK_PAGE`] 保持同步：主页时返回按钮
+    /// 隐藏，Esc 也必须无操作。快捷键不直接看页面链，避免出现第二套导航判断。
+    back_page_enabled: bool,
 }
 
 impl AppWrapper {
@@ -474,11 +486,21 @@ impl AppWrapper {
             started: false,
             last_page: String::new(),
             next_on_page_is_pop: false,
+            back_page_enabled: false,
         }
     }
 
+    /// 返回上一页：Esc 与左上角返回按钮共用这一个入口，
+    /// 具体返回到哪一页由 `PageSwitcher` 的页面链决定。
+    fn back_page(ctx: &mut EventCtx) {
+        ctx.submit_command(crate::ui::QUERY_POP_PAGE.with("").to(Target::Global));
+    }
+
     fn handle_command(&mut self, ctx: &mut EventCtx, cmd: &Command, data: &mut AppState) -> bool {
-        if let Some(name) = cmd.get(SELECT_VERSION) {
+        if let Some(enable) = cmd.get(scl_gui_widgets::widgets::ENABLE_BACK_PAGE) {
+            self.back_page_enabled = *enable;
+            return true;
+        } else if let Some(name) = cmd.get(SELECT_VERSION) {
             data.config.selected_version = name.to_owned();
             data.update_selected_version();
             save_config(data);
@@ -1352,7 +1374,7 @@ impl AppWrapper {
                 }
             }
         } else if notification.is(scl_gui_widgets::widgets::BACK_PAGE_CLICKED) {
-            ctx.submit_command(crate::ui::QUERY_POP_PAGE.with("").to(Target::Global));
+            Self::back_page(ctx);
         } else if notification.is(scl_gui_widgets::widgets::QUERY_CLOSE_WINDOW) {
             // DEV-10：官方关窗不保存版本级设置，会丢修改；这里在退出前补一次同步写盘。
             if crate::ui::PAGE_VERSION_SETTING == self.last_page
@@ -1388,6 +1410,9 @@ impl AppWrapper {
                 .with(enable_back)
                 .to(Target::Global),
         );
+        // druid 只把 KeyDown 路由给焦点链；页面切换后把焦点收回到根组件，
+        // 这样即使页面里没有任何输入框，Esc 也能被根组件收到。
+        ctx.request_focus();
         match page {
             PAGE_DOWNLOAD => download::on_app_push_page(ctx, data),
             PAGE_VERSION_SETTING => version_setting::on_app_push_page(ctx, data),
@@ -1484,6 +1509,13 @@ fn show_launch_error_page(ctx: &EventCtx) {
 impl Widget<AppState> for AppWrapper {
     fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut AppState, env: &druid::Env) {
         match event {
+            Event::KeyDown(key)
+                if should_back_on_key(self.back_page_enabled, key.code, key.repeat) =>
+            {
+                tracing::debug!("Esc 快捷键：返回上一页");
+                Self::back_page(ctx);
+                ctx.set_handled();
+            }
             Event::Command(cmd) => {
                 #[cfg(unix)]
                 crate::utils::progress::update_taskbar_progress(cmd, ctx.window());
@@ -1718,4 +1750,34 @@ fn login_authlib(ctx: &mut EventCtx, data: &mut AppState) {
         }
         Ok(())
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use druid::Code;
+
+    use super::should_back_on_key;
+
+    #[test]
+    fn escape_backs_when_button_is_available() {
+        assert!(should_back_on_key(true, Code::Escape, false));
+    }
+
+    #[test]
+    fn escape_does_nothing_on_main_page() {
+        // 主页没有返回目标，返回按钮隐藏，Esc 必须同样无操作。
+        assert!(!should_back_on_key(false, Code::Escape, false));
+    }
+
+    #[test]
+    fn escape_ignores_auto_repeat() {
+        // 按住 Esc 不连续退掉多层页面。
+        assert!(!should_back_on_key(true, Code::Escape, true));
+    }
+
+    #[test]
+    fn other_keys_are_not_back() {
+        assert!(!should_back_on_key(true, Code::Enter, false));
+        assert!(!should_back_on_key(true, Code::KeyE, false));
+    }
 }

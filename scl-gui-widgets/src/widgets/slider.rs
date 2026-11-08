@@ -934,3 +934,38 @@ fn slider_layout(
 
     size
 }
+
+#[cfg(test)]
+mod tests {
+    use druid::{widget::Axis, Size};
+
+    use super::SliderValueMapping;
+
+    /// 下载并发滑块使用 0..256 的范围；63 应落在约 24.6% 处，
+    /// 而不是错误地停在最左端（0）。
+    #[test]
+    fn value_maps_to_proportional_knob_position() {
+        let mapping = SliderValueMapping {
+            min: 0.,
+            max: 256.,
+            step: None,
+            axis: Axis::Horizontal,
+        };
+        let knob_size = 22.;
+        let slider_size = Size::new(232., 22.);
+
+        assert!((mapping.normalize(63.) - 63. / 256.).abs() < 1e-12);
+        let point = mapping.get_point(63., knob_size, slider_size);
+        let fraction = (point.x - knob_size / 2.) / (slider_size.width - knob_size);
+        assert!(
+            (fraction - 63. / 256.).abs() < 1e-12,
+            "63 应映射到 0..256 的 24.6% 位置，实际 {}",
+            fraction
+        );
+
+        assert_eq!(mapping.normalize(0.), 0.);
+        assert_eq!(mapping.normalize(256.), 1.);
+        assert_eq!(mapping.normalize(-1.), 0.);
+        assert_eq!(mapping.normalize(300.), 1.);
+    }
+}

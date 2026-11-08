@@ -385,3 +385,147 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
         Box::new(page.boxed())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use druid::{
+        BoxConstraints, Env, Event, EventCtx, LayoutCtx, LifeCycle, LifeCycleCtx, PaintCtx, Point,
+        Selector, Size, UpdateCtx, Widget, WidgetId, WidgetPod,
+    };
+    use scl_gui_widgets::widgets::Store;
+
+    use super::{parallel_post, parallel_pre};
+    use crate::app_state::AppState;
+
+    const SET_SLIDER_VALUE: Selector<f64> = Selector::new("test.set-slider-value");
+    const SET_CONFIG_VALUE: Selector<usize> = Selector::new("test.set-config-value");
+
+    /// 记录子组件收到的滑块值，并可被命令改成新值以模拟拖动。
+    struct Probe {
+        seen: Rc<Cell<f64>>,
+    }
+
+    impl Widget<f64> for Probe {
+        fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut f64, _env: &Env) {
+            if let Event::Command(cmd) = event {
+                if let Some(value) = cmd.get(SET_SLIDER_VALUE) {
+                    *data = *value;
+                    self.seen.set(*data);
+                    ctx.set_handled();
+                }
+            }
+        }
+
+        fn lifecycle(
+            &mut self,
+            _ctx: &mut LifeCycleCtx,
+            event: &LifeCycle,
+            data: &f64,
+            _env: &Env,
+        ) {
+            if let LifeCycle::WidgetAdded = event {
+                self.seen.set(*data);
+            }
+        }
+
+        fn update(&mut self, _ctx: &mut UpdateCtx, _old: &f64, data: &f64, _env: &Env) {
+            self.seen.set(*data);
+        }
+
+        fn layout(
+            &mut self,
+            _ctx: &mut LayoutCtx,
+            _bc: &BoxConstraints,
+            _data: &f64,
+            _env: &Env,
+        ) -> Size {
+            Size::ZERO
+        }
+
+        fn paint(&mut self, _ctx: &mut PaintCtx, _data: &f64, _env: &Env) {}
+    }
+
+    /// 在测试中模拟「配置被外部修改」，用于验证 Store 的 update 同步。
+    struct ParentSetter {
+        inner: WidgetPod<AppState, Store<AppState, f64>>,
+    }
+
+    impl Widget<AppState> for ParentSetter {
+        fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut AppState, env: &Env) {
+            if let Event::Command(cmd) = event {
+                if let Some(value) = cmd.get(SET_CONFIG_VALUE) {
+                    data.config.download_parallel_amount = *value;
+                    ctx.set_handled();
+                }
+            }
+            self.inner.event(ctx, event, data, env);
+        }
+
+        fn lifecycle(
+            &mut self,
+            ctx: &mut LifeCycleCtx,
+            event: &LifeCycle,
+            data: &AppState,
+            env: &Env,
+        ) {
+            self.inner.lifecycle(ctx, event, data, env);
+        }
+
+        fn update(&mut self, ctx: &mut UpdateCtx, _old: &AppState, data: &AppState, env: &Env) {
+            self.inner.update(ctx, data, env);
+        }
+
+        fn layout(
+            &mut self,
+            ctx: &mut LayoutCtx,
+            bc: &BoxConstraints,
+            data: &AppState,
+            env: &Env,
+        ) -> Size {
+            let size = self.inner.layout(ctx, bc, data, env);
+            self.inner.set_origin(ctx, Point::ZERO);
+            size
+        }
+
+        fn paint(&mut self, ctx: &mut PaintCtx, data: &AppState, env: &Env) {
+            self.inner.paint(ctx, data, env);
+        }
+
+        fn id(&self) -> Option<WidgetId> {
+            Some(self.inner.id())
+        }
+    }
+
+    #[test]
+    fn concurrency_slider_round_trips_with_config() {
+        let mut state = AppState::default();
+        state.config.download_parallel_amount = 63;
+        let seen = Rc::new(Cell::new(-1.0));
+        let store = Store::new_default(Probe { seen: seen.clone() }, parallel_pre, parallel_post);
+        let root = ParentSetter {
+            inner: WidgetPod::new(store),
+        };
+
+        druid::tests::harness::Harness::create_simple(state, root, |harness| {
+            harness.send_initial_events();
+            // 配置值 → 滑块值：首次构建就必须同步，不能等用户拖一次。
+            assert_eq!(seen.get(), 63.0, "配置里的 63 必须同步到滑块子组件");
+
+            // 配置在页面打开后被外部修改时，update 也要把新值同步给滑块。
+            harness.event(Event::Command(SET_CONFIG_VALUE.with(200usize)));
+            assert_eq!(seen.get(), 200.0, "配置变化应同步到滑块子组件");
+
+            // 滑块值 → 配置值：模拟拖动到 100 后应写回配置。
+            harness.event(Event::Command(SET_SLIDER_VALUE.with(100.0)));
+            assert_eq!(
+                harness.data().config.download_parallel_amount,
+                100,
+                "滑块位置变化应写回配置"
+            );
+            assert_eq!(seen.get(), 100.0);
+        });
+    }
+}

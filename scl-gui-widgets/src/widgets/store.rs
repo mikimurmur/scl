@@ -64,9 +64,17 @@ impl<F: Data, T: Data> Widget<F> for Store<F, T> {
         &mut self,
         ctx: &mut druid::LifeCycleCtx,
         event: &druid::LifeCycle,
-        _data: &F,
+        data: &F,
         env: &druid::Env,
     ) {
+        if let druid::LifeCycle::WidgetAdded = event {
+            // 页面首次构建时父数据相对 WidgetAdded 没有变化，druid 不会调用
+            // update；这里主动同步一次，保证子组件（滑块）拿到配置里的真实值，
+            // 而不是 Store 初始化时的默认值 0。
+            let mut post_data = self.post_data.to_owned();
+            (self.pre_data_processor)(data, &mut post_data);
+            self.post_data = post_data;
+        }
         tracing::trace!("Lifecycle Called");
         self.inner.lifecycle(ctx, event, &self.post_data, env)
     }
@@ -76,6 +84,10 @@ impl<F: Data, T: Data> Widget<F> for Store<F, T> {
         (self.pre_data_processor)(data, &mut post_data);
         if !post_data.same(&self.post_data) {
             tracing::trace!("Update Called");
+            // 必须先把同步后的值写入 self.post_data，再转发给子组件：
+            // 否则子组件（滑块）拿到的仍是初始化时的默认值 0，
+            // 首次进入页面时拇指会停在最左端，要等用户拖一次才同步。
+            self.post_data = post_data;
             self.inner.update(ctx, &self.post_data, env);
         }
     }

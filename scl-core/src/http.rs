@@ -7,7 +7,7 @@
 
 use std::{
     io::Read,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -22,7 +22,7 @@ static GLOBAL_CLIENT: OnceLock<ureq::Agent> = OnceLock::new();
 fn client() -> &'static ureq::Agent {
     GLOBAL_CLIENT.get_or_init(|| {
         let scl_version = std::option_env!("SCL_VERSION_TYPE").unwrap_or("0.0.0");
-        ureq::AgentBuilder::new()
+        let mut builder = ureq::AgentBuilder::new()
             .user_agent(&format!(
                 "SharpCraftLauncher/{scl_version} (github.com/Steve-xmh/SharpCraftLauncher) (stevexmh@qq.com)"
             ))
@@ -31,8 +31,18 @@ fn client() -> &'static ureq::Agent {
             .timeout_write(Duration::from_secs(30))
             .redirects(5)
             .max_idle_connections_per_host(1024)
-            .try_proxy_from_env(true)
-            .build()
+            .try_proxy_from_env(true);
+        // 显式接管 TLS：native-tls 使用操作系统证书库并做主机名/证书链校验，
+        // Linux 动态链接 libssl，Windows 用 SChannel，macOS 用 Security.framework。
+        match ureq::native_tls::TlsConnector::new() {
+            Ok(connector) => {
+                builder = builder.tls_connector(Arc::new(connector));
+            }
+            Err(err) => {
+                tracing::error!("初始化系统 TLS 失败，HTTPS 请求将不可用：{err}");
+            }
+        }
+        builder.build()
     })
 }
 
@@ -208,11 +218,7 @@ pub fn download_verified_with_timeout(
                             let mut file = fs_err::File::create(&tmp_dest_path)?;
                             std::io::copy(&mut response.into_reader(), &mut file)?;
                             drop(file);
-                            verify_downloaded_file(
-                                &tmp_dest_path,
-                                expected_sha1,
-                                expected_size,
-                            )?;
+                            verify_downloaded_file(&tmp_dest_path, expected_sha1, expected_size)?;
                             fs_err::rename(&tmp_dest_path, dest_path)?;
                             Ok(())
                         })();
@@ -419,8 +425,7 @@ pub mod no_retry {
     use serde::{de::DeserializeOwned, Serialize};
 
     use super::RequestResult;
-    use crate::auth::structs::mojang::ErrorResponse;
-    use crate::prelude::DynResult;
+    use crate::{auth::structs::mojang::ErrorResponse, prelude::DynResult};
 
     /// 使用与全局客户端一致的连接/读写超时
     pub fn get(uri: impl AsRef<str>) -> super::RequestBuilder {
@@ -499,8 +504,7 @@ pub mod no_retry {
     #[cfg(test)]
     mod tests {
         use super::parse_body;
-        use crate::auth::structs::mojang::AuthenticateResponse;
-        use crate::http::RequestResult;
+        use crate::{auth::structs::mojang::AuthenticateResponse, http::RequestResult};
 
         const FULL: &str = r#"{"accessToken":"jwt.token.value","clientToken":"cf63005efb2fd19f2d2942786bc9153e","availableProfiles":[{"id":"11111111222233334444555555555555","name":"RoleA"}],"selectedProfile":{"id":"11111111222233334444555555555555","name":"RoleA"},"user":{"id":"aaaa","properties":[]}}"#;
 
@@ -685,10 +689,7 @@ mod timeout_tests {
             Some(Duration::from_secs(5)),
         )
         .expect("匹配的大小与 SHA1 应下载成功");
-        assert_eq!(
-            fs_err::read(&dest).expect("读取下载文件"),
-            b"good".to_vec()
-        );
+        assert_eq!(fs_err::read(&dest).expect("读取下载文件"), b"good".to_vec());
         let _ = fs_err::remove_file(&dest);
         handle.join().ok();
     }

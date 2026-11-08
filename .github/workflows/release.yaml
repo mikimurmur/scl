@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: 打包（${{ matrix.platform }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-latest
+          - platform: windows-x86_64
+            os: windows-latest
+          - platform: macos-universal
+            os: macos-latest
+    env:
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: 克隆仓库
+        uses: actions/checkout@v4
+
+      - name: Linux - 安装构建依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libssl-dev pkg-config
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.platform }}
+          cache-on-failure: true
+
+      - name: 读取版本号
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
+      - name: 构建（Linux / Windows）
+        if: runner.os != 'macOS'
+        run: cargo build -p sharp_craft_launcher --release
+
+      - name: 构建（macOS 通用二进制）
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build -p sharp_craft_launcher --release --target aarch64-apple-darwin
+          cargo build -p sharp_craft_launcher --release --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/SharpCraftLauncher \
+            target/aarch64-apple-darwin/release/SharpCraftLauncher \
+            target/x86_64-apple-darwin/release/SharpCraftLauncher
+          chmod +x dist/SharpCraftLauncher
+
+      - name: 打包（Linux / macOS）
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cp target/release/SharpCraftLauncher dist/SharpCraftLauncher
+          fi
+          archive="SharpCraftLauncher-${VERSION}-${PLATFORM}.tar.gz"
+          tar -czf "dist/$archive" -C dist SharpCraftLauncher
+          (cd dist && shasum -a 256 "$archive" > "$archive.sha256")
+
+      - name: 打包（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/SharpCraftLauncher.exe dist/
+          $archive = "SharpCraftLauncher-$env:VERSION-$env:PLATFORM.zip"
+          Compress-Archive -Path dist/SharpCraftLauncher.exe -DestinationPath "dist/$archive"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$archive").Hash.ToLower()
+          "$hash  $archive" | Out-File -Encoding utf8NoBOM "dist/$archive.sha256"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: SharpCraftLauncher-${{ env.VERSION }}-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: 发布到 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

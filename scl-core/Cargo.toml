@@ -15,7 +15,9 @@ rust-version = "1.75"
 [dependencies]
 anyhow = "^1.0"
 base64 = "^0.21"
-ureq = "^2.12"
+# 使用系统 TLS（Linux/Windows/macOS 分别走 OpenSSL / SChannel / Security.framework），
+# 不启用 ureq 默认的 rustls，避免把 TLS 栈静态链进可执行文件。
+ureq = { version = "^2.12", default-features = false, features = ["gzip", "native-tls"] }
 rayon = "=1.10.0"
 image = { version = "^0.24", default-features = false, features = ["jpeg", "png", "gif", "bmp", "rgb"] }
 webp = "^0.2"

@@ -7,3 +7,13 @@ members = [
     "scl-gui-animation",
     "scl-gui"
 ]
+
+# release 瘦身配置：功能不变，仅调整代码生成与符号表。
+# panic=abort 的代价：进程内 panic 直接终止，catch_unwind 不再能恢复；
+# strip=symbols 的代价：backtrace 只有地址没有函数名。
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+strip = "symbols"

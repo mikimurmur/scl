@@ -6,37 +6,56 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   rustfmt:
     name: 语法格式检查
     runs-on: ubuntu-latest
     steps:
       - name: 克隆仓库
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
+      # rustfmt.toml 使用了 unstable 选项，必须用 nightly 的 rustfmt。
       - name: 安装 Rust 工具链
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: stable
-          profile: minimal
           components: rustfmt
-          override: true
 
       - name: 运行 cargo fmt 格式检查
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+        run: cargo fmt --all -- --check
 
   test:
-    name: 编译&测试
+    name: 编译&测试（${{ matrix.os }}）
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [macOS-latest, windows-latest, ubuntu-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: 克隆仓库
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: 待重写
-        run: echo todo
+      - name: Linux - 安装构建依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libssl-dev pkg-config
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 构建
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test
+        run: cargo test --workspace

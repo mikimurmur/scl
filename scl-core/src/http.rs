@@ -628,10 +628,14 @@ mod timeout_tests {
         });
 
         let uri = format!("http://{addr}/stall");
+        let dest = std::env::temp_dir()
+            .join("scl-http-timeout-test.bin")
+            .to_string_lossy()
+            .into_owned();
         let start = Instant::now();
         let result = download_with_timeout(
             std::slice::from_ref(&uri),
-            "/tmp/scl-http-timeout-test.bin",
+            &dest,
             0,
             Some(Duration::from_millis(200)),
         );
@@ -641,7 +645,7 @@ mod timeout_tests {
             "超时窗口应限制等待时间，实际 {:?}",
             start.elapsed()
         );
-        let _ = fs_err::remove_file("/tmp/scl-http-timeout-test.bin.tmp");
+        let _ = fs_err::remove_file(format!("{dest}.tmp"));
         handle.join().ok();
     }
 
@@ -652,7 +656,10 @@ mod timeout_tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
         let addr = listener.local_addr().expect("获取本地地址");
         let handle = serve_body(listener, b"bad", 5);
-        let dest = format!("/tmp/scl-http-bad-sha1-{}.bin", std::process::id());
+        let dest = std::env::temp_dir()
+            .join(format!("scl-http-bad-sha1-{}.bin", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
         let _ = fs_err::remove_file(&dest);
         let uri = format!("http://{addr}/bad");
         let result = download_verified_with_timeout(
@@ -676,7 +683,10 @@ mod timeout_tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
         let addr = listener.local_addr().expect("获取本地地址");
         let handle = serve_body(listener, b"good", 1);
-        let dest = format!("/tmp/scl-http-good-sha1-{}.bin", std::process::id());
+        let dest = std::env::temp_dir()
+            .join(format!("scl-http-good-sha1-{}.bin", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
         let _ = fs_err::remove_file(&dest);
         let sha1 = sha1_smol::Sha1::from(b"good").hexdigest();
         let uri = format!("http://{addr}/good");

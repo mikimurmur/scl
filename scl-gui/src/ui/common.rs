@@ -1,7 +1,7 @@
 //! 各个页面共用的界面组件。
 
 use druid::{
-    widget::{Button as DruidButton, CrossAxisAlignment, Flex, LabelText, TextBox},
+    widget::{CrossAxisAlignment, Flex, LabelText, TextBox},
     Widget, WidgetExt,
 };
 use scl_gui_widgets::widgets::Button as SclButton;
@@ -9,8 +9,8 @@ use scl_gui_widgets::widgets::Button as SclButton;
 use crate::app_state::{AppState, ModState};
 
 /// 创建一个普通按钮
-pub fn button(text: impl Into<LabelText<AppState>>) -> DruidButton<AppState> {
-    DruidButton::new(text)
+pub fn button(text: impl Into<LabelText<AppState>>) -> SclButton<AppState> {
+    SclButton::new(text)
 }
 
 /// 创建一个强调色按钮

@@ -352,6 +352,8 @@ pub struct AppState {
     pub launch_error: Option<String>,
     /// 启动器是否正在启动游戏
     pub launching: bool,
+    /// 本次正在启动的版本名（启动失败后的自动修复只针对它）
+    pub launching_version: String,
     /// 首次启动失败后是否已安排“检查文件完整性并重新启动”
     pub auto_recheck_retry: bool,
     /// 是否第一次运行启动器（配置文件原本不存在）
@@ -499,6 +501,7 @@ impl AppState {
             mod_download_install_version: String::new(),
             launch_error: None,
             launching: false,
+            launching_version: String::new(),
             auto_recheck_retry: false,
             first_run: false,
         }

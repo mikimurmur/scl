@@ -422,6 +422,44 @@ pub struct VersionInfo {
     pub minecraft_version: MinecraftVersion,
     /// 猜测的所需最低 Java 版本，1.17 之后一般为 16+，其余的为 8+
     pub required_java: u8,
+    /// 继承链中是否存在显式 `javaVersion` 要求。
+    ///
+    /// 为 `true` 时 `required_java` 来自版本元数据（含父版本），启动器必须
+    /// 据此选择运行时；为 `false` 时只能沿用 8+/16+ 的版本号启发式。
+    pub required_java_from_metadata: bool,
+}
+
+/// 沿 `inheritsFrom` / `clientVersion` 查找继承链里显式的 `javaVersion`。
+///
+/// 返回 `(要求的主版本, 是否来自显式元数据)`。找不到显式要求时回退到
+/// [`VersionMeta::required_java_version`] 的版本号启发式。
+fn resolve_required_java(version_base: &Path, meta: &VersionMeta) -> (u8, bool) {
+    fn explicit_requirement(version_base: &Path, meta: &VersionMeta, depth: u8) -> Option<u8> {
+        if let Some(java) = &meta.java_version {
+            return Some(java.major_version);
+        }
+        if depth == 0 {
+            return None;
+        }
+        let parent_name = if !meta.inherits_from.is_empty() {
+            meta.inherits_from.as_str()
+        } else if !meta.client_version.is_empty() {
+            meta.client_version.as_str()
+        } else {
+            return None;
+        };
+        let parent_path = version_base
+            .join(parent_name)
+            .join(format!("{parent_name}.json"));
+        let data = fs_err::read_to_string(parent_path).ok()?;
+        let parent: VersionMeta = serde_json::from_str(data.trim_start_matches('\u{feff}')).ok()?;
+        explicit_requirement(version_base, &parent, depth - 1)
+    }
+
+    match explicit_requirement(version_base, meta, 5) {
+        Some(required) => (required, true),
+        None => (meta.required_java_version(), false),
+    }
 }
 
 impl VersionInfo {
@@ -456,7 +494,10 @@ impl VersionInfo {
                 if jar_path.is_file() {
                     meta.main_jars.push(get_full_path(jar_path));
                 }
-                self.required_java = meta.required_java_version();
+                let (required_java, required_java_from_metadata) =
+                    resolve_required_java(version_base_path, &meta);
+                self.required_java = required_java;
+                self.required_java_from_metadata = required_java_from_metadata;
                 if let Some(assets) = &meta.asset_index {
                     if let Ok((_, ver)) = crate::semver::parse_version(&assets.id) {
                         self.minecraft_version = ver;
@@ -787,4 +828,79 @@ where
     }
 
     deserializer.deserialize_any(StringOrVec(PhantomData))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::VersionInfo;
+
+    fn write_version(versions: &Path, name: &str, json: &str) {
+        let dir = versions.join(name);
+        fs_err::create_dir_all(&dir).expect("创建版本目录");
+        fs_err::write(dir.join(format!("{name}.json")), json).expect("写入版本 JSON");
+    }
+
+    #[test]
+    fn loader_uses_inherited_java_version_requirement() {
+        let dir = std::env::temp_dir().join(format!(
+            "scl_java_requirement_{}_{}",
+            std::process::id(),
+            "inherited"
+        ));
+        let _ = fs_err::remove_dir_all(&dir);
+        let versions = dir.join("versions");
+        write_version(
+            &versions,
+            "26.1.2",
+            r#"{"mainClass":"net.minecraft.client.main.Main","javaVersion":{"component":"java-runtime-epsilon","majorVersion":25},"assetIndex":{"id":"30","sha1":"","size":0,"totalSize":0,"url":""}}"#,
+        );
+        write_version(
+            &versions,
+            "26.1.2-neoforge-26.1.2.126",
+            r#"{"mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher","inheritsFrom":"26.1.2"}"#,
+        );
+
+        let mut info = VersionInfo {
+            version_base: versions.to_string_lossy().to_string(),
+            version: "26.1.2-neoforge-26.1.2.126".into(),
+            ..Default::default()
+        };
+        info.load().expect("加载版本元数据");
+        assert_eq!(info.required_java, 25, "应继承父版本的 Java 25 要求");
+        assert!(info.required_java_from_metadata);
+
+        let _ = fs_err::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_without_java_version_uses_fallback_heuristic() {
+        let dir = std::env::temp_dir().join(format!(
+            "scl_java_requirement_{}_{}",
+            std::process::id(),
+            "legacy"
+        ));
+        let _ = fs_err::remove_dir_all(&dir);
+        let versions = dir.join("versions");
+        write_version(
+            &versions,
+            "1.16.5",
+            r#"{"mainClass":"net.minecraft.client.main.Main","assetIndex":{"id":"1.16.5","sha1":"","size":0,"totalSize":0,"url":""}}"#,
+        );
+
+        let mut info = VersionInfo {
+            version_base: versions.to_string_lossy().to_string(),
+            version: "1.16.5".into(),
+            ..Default::default()
+        };
+        info.load().expect("加载版本元数据");
+        assert_eq!(info.required_java, 8);
+        assert!(
+            !info.required_java_from_metadata,
+            "没有显式 javaVersion 时仍走 8+/16+ 启发式"
+        );
+
+        let _ = fs_err::remove_dir_all(&dir);
+    }
 }

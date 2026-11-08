@@ -627,15 +627,15 @@ impl AppWrapper {
         } else if cmd.get(START_GAME).is_some() {
             starting::start_game(ctx, data);
             if data.launching {
-                // 重试轮（闩锁为真）时启动页已在栈顶，不重复压栈；
-                // 官方是启动任务内联重试，全程只有一个 starting 页。
+                // 自动重试轮不重新压入启动页：失败时错误页已在最上层，
+                // 后台静默重试，成功由 GameWindowReady 统一弹回主页。
                 if !data.auto_recheck_retry {
                     trace_auto_page("push", PAGE_STARTING, "START_GAME");
                     ctx.submit_command(crate::ui::PUSH_PAGE.with(PAGE_STARTING).to(Target::Global));
                 } else {
                     trace_auto_page("no-push", PAGE_STARTING, "START_GAME auto-recheck retry");
                 }
-            } else if data.launch_error.is_some() {
+            } else if data.launch_error.is_some() && self.last_page != PAGE_LAUNCH_ERROR {
                 trace_auto_page("push", PAGE_LAUNCH_ERROR, "START_GAME failed synchronously");
                 ctx.submit_command(
                     crate::ui::PUSH_PAGE
@@ -1096,11 +1096,18 @@ impl AppWrapper {
                 data.starting_tip = None;
                 data.launch_error = Some(err.clone());
                 data.launch_error_logs.push_back(err);
+                // 启动失败即离开启动中页面：不能把启动页留在栈上继续转圈。
+                // 已在错误页时（自动重试轮再次失败）不重复弹栈，避免错误页闪烁。
+                if self.last_page != PAGE_LAUNCH_ERROR {
+                    show_launch_error_page(ctx);
+                }
                 if data.config.auto_check_when_first_start_failed && !data.auto_recheck_retry {
                     data.auto_recheck_retry = true;
                     data.launch_error_logs
                         .push_back("启动游戏失败，正在尝试检查文件完整性".into());
                     let folder = data.config.minecraft_folder.to_path_buf();
+                    let version_base = data.versions_folder();
+                    let version_name = data.launching_version.clone();
                     let source = data.config.download_source.clone();
                     let parallel_amount = data.config.download_parallel_amount;
                     let sink = ctx.get_external_handle();
@@ -1109,21 +1116,31 @@ impl AppWrapper {
                         let progress = Progress::new(sink.clone());
                         scl_core::progress::Reporter::send(
                             &progress,
-                            scl_core::progress::ReportState::SetMessage(
-                                "正在尝试检查文件完整性".into(),
-                            ),
+                            scl_core::progress::ReportState::SetMessage(format!(
+                                "正在尝试检查版本 {version_name} 的文件完整性"
+                            )),
                         );
-                        match crate::utils::fix_minecraft::fix_minecraft(
+                        // 只修复本次要启动的那个版本（及其继承链），
+                        // 不再遍历 versions 目录，避免无关版本被补全。
+                        let version_info = scl_core::version::structs::VersionInfo {
+                            version_base: version_base.to_string_lossy().to_string(),
+                            version: version_name.clone(),
+                            ..Default::default()
+                        };
+                        match crate::utils::fix_minecraft::fix_minecraft_version(
                             &folder,
+                            &version_info,
                             source,
                             parallel_amount,
                             progress.clone(),
                         ) {
                             Ok(fixed) => {
-                                tracing::info!("文件完整性检查完成，修复了 {fixed} 个文件");
+                                tracing::info!(
+                                    "版本 {version_name} 文件完整性检查完成，修复了 {fixed} 个文件"
+                                );
                             }
                             Err(err) => {
-                                tracing::warn!("文件完整性检查失败：{err:?}");
+                                tracing::warn!("版本 {version_name} 文件完整性检查失败：{err:?}");
                             }
                         }
                         progress.remove();
@@ -1136,7 +1153,6 @@ impl AppWrapper {
                     });
                 } else {
                     data.auto_recheck_retry = false;
-                    show_launch_error_page(ctx);
                 }
             }
             AppEvent::RecheckRetry => {
@@ -1492,18 +1508,19 @@ impl AppWrapper {
     }
 }
 
-/// 启动失败/崩溃终态：先回主界面，再推入启动失败页
-fn show_launch_error_page(ctx: &EventCtx) {
-    let sink = ctx.get_external_handle();
-    thread_main(move || {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        trace_auto_page("reset", PAGE_MAIN, "launch error 500ms timer");
-        let _ = sink.submit_command(crate::ui::RESET_PAGE_TO, PAGE_MAIN, Target::Global);
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        trace_auto_page("push", PAGE_LAUNCH_ERROR, "launch error 250ms timer");
-        let _ = sink.submit_command(crate::ui::PUSH_PAGE, PAGE_LAUNCH_ERROR, Target::Global);
-        Ok(())
-    });
+/// 启动失败/崩溃终态：立即回主界面并推入启动失败页
+///
+/// `RESET_PAGE_TO` 会撤销尚未完成的推入动画并截断页面链，因此不需要
+/// 旧的「等待 500ms 再弹栈」定时器；启动中页会被立刻移除，转圈动画随之停止。
+fn show_launch_error_page(ctx: &mut EventCtx) {
+    trace_auto_page("reset", PAGE_MAIN, "launch error");
+    ctx.submit_command(crate::ui::RESET_PAGE_TO.with(PAGE_MAIN).to(Target::Global));
+    trace_auto_page("push", PAGE_LAUNCH_ERROR, "launch error");
+    ctx.submit_command(
+        crate::ui::PUSH_PAGE
+            .with(PAGE_LAUNCH_ERROR)
+            .to(Target::Global),
+    );
 }
 
 impl Widget<AppState> for AppWrapper {

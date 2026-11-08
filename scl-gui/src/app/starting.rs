@@ -480,6 +480,7 @@ pub fn start_game(ctx: &mut EventCtx, data: &mut AppState) {
     let recheck = data.auto_recheck_retry;
     let sink = ctx.get_external_handle();
     data.launching = true;
+    data.launching_version = version_name.clone();
     data.launch_window_ready = false;
     data.starting_tip = Some(crate::ui::starting::random_tip());
     data.launch_error = None;
@@ -545,10 +546,6 @@ fn launch_game(
     let java_args = split_launch_args(&cfg.jvm_args, "解析切割 JVM 参数参数失败")?;
     let game_args = split_launch_args(&cfg.game_args, "解析切割游戏参数失败")?;
     let required_java = version_info.required_java;
-    let java_info = cfg
-        .java_for_version(required_java)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("没有可用的 Java 运行时，请先在设置中添加 Java"))?;
     // 官方在启动环节按「独立配置 → Java < 16 → Java 16+」的顺序选择运行时并分别记录日志。
     let independent_java = version_info
         .scl_launch_config
@@ -558,12 +555,42 @@ fn launch_game(
     let (java_path, java_branch) = if let Some(path) = independent_java {
         tracing::info!("选择独立配置的 Java 运行环境: {}", path);
         (path.to_owned(), "独立配置")
-    } else if required_java >= 16 {
-        tracing::info!("选择 Java 16+ 运行环境: {}", java_info.path);
-        (java_info.path.clone(), "16+")
+    } else if version_info.required_java_from_metadata {
+        // 元数据（含继承链）明确给出了 javaVersion：以它为准挑选运行时，
+        // 不再用「<16 / 16+」两档启发式，避免把 Java 8 塞给要求 Java 25 的版本。
+        let preferred = if required_java >= 16 {
+            &cfg.javas.selected_modern
+        } else {
+            &cfg.javas.selected_leagzy
+        };
+        let discovered = cfg.javas.javapaths.iter().cloned().collect::<Vec<_>>();
+        let selected =
+            crate::app::java::select_java_for_requirement(&discovered, required_java, preferred)
+                .map_err(|err| {
+                    anyhow::anyhow!(
+                        "版本 {} 的 Java 版本不满足要求：{err}",
+                        version_info.version
+                    )
+                })?;
+        tracing::info!(
+            "按版本要求选择 Java {}+ 运行环境: {}",
+            required_java,
+            selected.path
+        );
+        (selected.path.clone(), "按版本要求")
     } else {
-        tracing::info!("选择 Java < 16 运行环境: {}", java_info.path);
-        (java_info.path.clone(), "< 16")
+        // 元数据没有显式 javaVersion 时才回退到 8+/16+ 启发式。
+        let java_info = cfg
+            .java_for_version(required_java)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("没有可用的 Java 运行时，请先在设置中添加 Java"))?;
+        if required_java >= 16 {
+            tracing::info!("选择 Java 16+ 运行环境: {}", java_info.path);
+            (java_info.path.clone(), "16+")
+        } else {
+            tracing::info!("选择 Java < 16 运行环境: {}", java_info.path);
+            (java_info.path.clone(), "< 16")
+        }
     };
     let runtime = match JavaRuntime::from_java_path(&java_path) {
         Ok(runtime) => runtime,

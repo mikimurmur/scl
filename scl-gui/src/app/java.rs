@@ -256,6 +256,49 @@ pub fn manually_add_java(ctx: &EventCtx, _data: &mut AppState, path: &str) {
     });
 }
 
+/// 按版本元数据要求选择 Java 运行时。
+///
+/// 优先沿用用户已选中的运行时（只要它满足要求）；否则从已发现的运行时里
+/// 取满足要求的最低主版本；没有任何满足项时返回带当前发现列表的错误，
+/// 不再硬塞一个不满足要求的运行时。
+pub fn select_java_for_requirement<'a>(
+    javas: &'a [JavaRuntimeInfo],
+    required: u8,
+    preferred_path: &str,
+) -> anyhow::Result<&'a JavaRuntimeInfo> {
+    let satisfies = |info: &JavaRuntimeInfo| info.main_version > 0 && info.main_version >= required;
+    if let Some(preferred) = javas
+        .iter()
+        .find(|info| info.path == preferred_path && satisfies(info))
+    {
+        return Ok(preferred);
+    }
+    if let Some(lowest) = javas
+        .iter()
+        .filter(|info| satisfies(info))
+        .min_by_key(|x| x.main_version)
+    {
+        return Ok(lowest);
+    }
+    let mut found: Vec<u8> = javas
+        .iter()
+        .map(|info| info.main_version)
+        .filter(|version| *version > 0)
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    let found = if found.is_empty() {
+        "无".to_owned()
+    } else {
+        found
+            .iter()
+            .map(|version| format!("Java {version}"))
+            .collect::<Vec<_>>()
+            .join("、")
+    };
+    anyhow::bail!("需要 Java {required} 或更高，已发现的运行时都不满足（已发现：{found}）")
+}
+
 /// 搜索可用的 Java 运行时；结果通过 [`AppEvent::JavaLoaded`] 合并回配置
 pub fn search_java(ctx: &EventCtx, _data: &AppState) {
     let sink = ctx.get_external_handle();
@@ -314,7 +357,9 @@ pub fn search_java(ctx: &EventCtx, _data: &AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{merged_java_list, same_runtime, scan_notice, JavaRuntimeInfo};
+    use super::{
+        merged_java_list, same_runtime, scan_notice, select_java_for_requirement, JavaRuntimeInfo,
+    };
 
     fn runtime(path: &str, version: &str, main_version: u8, name: &str) -> JavaRuntimeInfo {
         JavaRuntimeInfo {
@@ -422,5 +467,49 @@ mod tests {
             !same_runtime(&a, &b),
             "不同路径的 JDK 即使主版本相同也不能合并"
         );
+    }
+
+    fn java_set() -> Vec<JavaRuntimeInfo> {
+        vec![
+            runtime("/java/8/bin/java", "1.8.0_504", 8, "Java 8"),
+            runtime("/java/16/bin/java", "16.0.2", 16, "Java 16"),
+            runtime("/java/21/bin/java", "21.0.11", 21, "Java 21"),
+            runtime("/java/25/bin/java", "25.0.3", 25, "Java 25"),
+        ]
+    }
+
+    #[test]
+    fn required_java_picks_lowest_satisfying_runtime() {
+        // 26.x 元数据要求 Java 25：机器上有 25 时必须选它，而不是 Java 8。
+        let set = java_set();
+        let selected = select_java_for_requirement(&set, 25, "").expect("应找到 Java 25");
+        assert_eq!(selected.main_version, 25);
+
+        // 要求 17 时取满足要求的最低主版本（21），不会跳去更高的 25。
+        let selected = select_java_for_requirement(&set, 17, "").expect("应找到 Java 21");
+        assert_eq!(selected.main_version, 21);
+    }
+
+    #[test]
+    fn required_java_keeps_selected_runtime_when_it_satisfies() {
+        let set = java_set();
+        // 用户已选 Java 25，要求 16 时沿用用户选择，不强行降到 21。
+        let selected =
+            select_java_for_requirement(&set, 16, "/java/25/bin/java").expect("沿用已选");
+        assert_eq!(selected.main_version, 25);
+
+        // 已选的 Java 8 不满足 25，必须改选满足要求的最低版本。
+        let selected = select_java_for_requirement(&set, 25, "/java/8/bin/java").expect("改选");
+        assert_eq!(selected.main_version, 25);
+    }
+
+    #[test]
+    fn required_java_rejects_when_nothing_satisfies() {
+        let set = java_set();
+        let err = select_java_for_requirement(&set, 30, "").expect_err("不应硬塞运行时");
+        let message = format!("{err}");
+        assert!(message.contains("需要 Java 30"), "{message}");
+        assert!(message.contains("Java 8"), "{message}");
+        assert!(message.contains("Java 25"), "{message}");
     }
 }

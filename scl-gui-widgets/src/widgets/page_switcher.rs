@@ -322,7 +322,24 @@ impl<T: Data> Widget<T> for PageSwitcher<T> {
                     self.active_page,
                     self.page_anime_queue.len()
                 );
-                let target = self.page_chain.iter().copied().find(|p| p == to_page);
+                let target = self
+                    .page_chain
+                    .iter()
+                    .copied()
+                    .find(|p| p == to_page)
+                    .or_else(|| {
+                        // 首个页面（main）的推入动画尚未完成时页面链还是空的，
+                        // 此时 RESET_PAGE_TO main 不能直接丢弃：否则启动失败页
+                        // 会排在 starting 之后，形成「错误页盖在启动中页上」。
+                        if self.page_chain.is_empty() {
+                            self.inner_builder
+                                .keys()
+                                .copied()
+                                .find(|key| *key == *to_page)
+                        } else {
+                            None
+                        }
+                    });
                 if let Some(target) = target {
                     if self.page_anime_queue.is_empty()
                         && target != self.active_page
@@ -343,9 +360,13 @@ impl<T: Data> Widget<T> for PageSwitcher<T> {
                             );
                         }
                         self.active_page = target;
-                        while self.page_chain.last() != Some(&target) {
-                            self.page_chain.pop();
+                        if let Some(index) = self.page_chain.iter().position(|p| *p == target) {
+                            self.page_chain.truncate(index + 1);
+                        } else {
+                            // 初始页尚未入链：直接把它作为链首，后续 push 才能排在其后。
+                            self.page_chain.push(target);
                         }
+                        self.load_page(target);
                         self.clean_unused_page();
                         if changed {
                             if let Some(inner) = self.inner.get_mut(target) {

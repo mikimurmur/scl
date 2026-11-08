@@ -919,16 +919,21 @@ mod tests {
             split_launch_args(r#"-Xmx1G "-Dfoo=bar baz""#, "ctx").unwrap(),
             vec!["-Xmx1G".to_owned(), "-Dfoo=bar baz".to_owned()]
         );
-        // 单引号同样分组
-        assert_eq!(
-            split_launch_args("-Dq='a b'", "ctx").unwrap(),
-            vec!["-Dq=a b".to_owned()]
-        );
-        // 反斜杠转义空格
-        assert_eq!(
-            split_launch_args(r"-Dfoo=a\ b", "ctx").unwrap(),
-            vec!["-Dfoo=a b".to_owned()]
-        );
+        // Windows 使用 winsplit（官方命令行解析规则），单引号与反斜杠不是转义符；
+        // 以下两条仅适用于 Unix 的 shlex 语义。
+        #[cfg(unix)]
+        {
+            // 单引号同样分组
+            assert_eq!(
+                split_launch_args("-Dq='a b'", "ctx").unwrap(),
+                vec!["-Dq=a b".to_owned()]
+            );
+            // 反斜杠转义空格
+            assert_eq!(
+                split_launch_args(r"-Dfoo=a\ b", "ctx").unwrap(),
+                vec!["-Dfoo=a b".to_owned()]
+            );
+        }
         // 多行输入按空白切分
         assert_eq!(
             split_launch_args("-a\n-b\t-c", "ctx").unwrap(),
@@ -941,7 +946,8 @@ mod tests {
             err.to_string(),
             r#"解析切割 JVM 参数参数失败: "-Xmx1G \"unclosed""#
         );
-        // 未闭合单引号同理
+        // 未闭合单引号同理（仅 Unix shlex 会把单引号当引号）
+        #[cfg(unix)]
         assert!(split_launch_args("-Dq='unclosed", "ctx").is_err());
     }
 }

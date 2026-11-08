@@ -1075,7 +1075,9 @@ mod config_migration_tests {
         // 只有部分字段：其余字段按默认值补齐。
         let config: Config =
             serde_json::from_str(r#"{"selected_version":"26.3"}"#).expect("缺失字段应能读取");
-        assert_eq!(config.javas.javapaths.len(), 2);
+        // Windows 额外附带 javaw 的 Java 8/16 默认项，共 4 条。
+        let expected_java_paths = if cfg!(windows) { 4 } else { 2 };
+        assert_eq!(config.javas.javapaths.len(), expected_java_paths);
         assert_eq!(config.java_for_version(8).unwrap().main_version, 8);
         assert_eq!(config.java_for_version(16).unwrap().main_version, 16);
         assert_top_level_order(&pretty(&config));

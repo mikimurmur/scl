@@ -70,6 +70,18 @@ impl JavaRuntime {
     pub fn arch(&self) -> Arch {
         self.java_arch
     }
+
+    /// 仅用于单元测试：直接指定路径与主版本构造运行时，不执行任何 Java 进程
+    #[cfg(test)]
+    pub(crate) fn for_test(java_path: &str, java_main_version: u8) -> Self {
+        Self {
+            java_path: java_path.to_owned(),
+            java_version: format!("{java_main_version}.0.0"),
+            java_main_version,
+            java_64bit: true,
+            java_arch: Arch::X64,
+        }
+    }
 }
 
 /// 执行 Java 并使用 -version 获取其版本输出

@@ -160,6 +160,55 @@ fn auth_xuid(auth: &AuthMethod) -> String {
     }
 }
 
+/// `--sun-misc-unsafe-memory-access` 参数的起始文本
+const SUN_MISC_UNSAFE_MEMORY_ACCESS_ARG: &str = "--sun-misc-unsafe-memory-access";
+
+/// 该参数由 JDK 23 引入，低于此版本的 Java 会把它当作未知参数并拒绝启动
+const SUN_MISC_UNSAFE_MEMORY_ACCESS_MIN_JAVA: u8 = 23;
+
+/// 判断版本元数据里的 JVM 参数是否需要因为运行时版本过低而跳过
+fn should_skip_jvm_arg(arg: &str, java_main_version: u8) -> bool {
+    arg.starts_with(SUN_MISC_UNSAFE_MEMORY_ACCESS_ARG)
+        && java_main_version < SUN_MISC_UNSAFE_MEMORY_ACCESS_MIN_JAVA
+}
+
+/// 启动前校验实际选中的 Java 运行时是否满足版本元数据要求
+///
+/// 不满足时直接返回错误，由调用方转成启动失败提示；此时尚未构造任何启动参数，
+/// 更不会拉起游戏进程，避免把不兼容的参数塞给 JVM 碰运气。
+fn check_java_version(version: &str, required_java: u8, runtime: &JavaRuntime) -> DynResult<()> {
+    let actual_java = runtime.main_version();
+    if actual_java == 0 {
+        let message = format!(
+            "无法识别所选 Java 运行时的版本（路径：{}），无法确认是否满足版本 {} 需要 Java {} 的要求，已拒绝启动",
+            runtime.path(),
+            version,
+            required_java
+        );
+        tracing::error!("{message}");
+        anyhow::bail!("{message}");
+    }
+    if actual_java < required_java {
+        let message = format!(
+            "Java 版本不满足启动要求：版本 {} 需要 Java {} 或更高，当前选中的 Java 为 {}（路径：{}）。请安装或选择符合要求的 Java 运行时",
+            version,
+            required_java,
+            actual_java,
+            runtime.path()
+        );
+        tracing::error!("{message}");
+        anyhow::bail!("{message}");
+    }
+    tracing::info!(
+        "Java 版本检查通过：版本 {} 需要 Java {}，当前使用 Java {}（{}）",
+        version,
+        required_java,
+        actual_java,
+        runtime.path()
+    );
+    Ok(())
+}
+
 impl Client {
     /// 根据传入的启动客户端版本设定创建一个客户端
     ///
@@ -185,6 +234,12 @@ impl Client {
         } else {
             cfg.java_runtime.to_owned()
         };
+
+        // 启动前 Java 版本门槛：以合并继承链后的版本元数据要求为准，
+        // 与实际将被使用的 Java 运行时（含版本独立配置）比较。所有加载器
+        // 最终都经由 Client::new 组装参数，因此这里是公共入口。
+        let required_java = meta.required_java_version();
+        check_java_version(&cfg.version_info.version, required_java, &java_runtime)?;
 
         // 变量集，用来给参数中 ${VAR} 做文本替换
         let mut variables: HashMap<&'static str, String> = HashMap::with_capacity(19);
@@ -460,11 +515,30 @@ impl Client {
         if let Some(arguments) = &meta.arguments {
             for arg in &arguments.jvm {
                 match arg {
-                    Argument::Common(arg) => args.push(replace_each(&variables, arg.to_owned())),
+                    Argument::Common(arg) => {
+                        let arg = replace_each(&variables, arg.to_owned());
+                        if should_skip_jvm_arg(&arg, java_runtime.main_version()) {
+                            tracing::debug!(
+                                "当前 Java {} 不支持参数 {}，已跳过",
+                                java_runtime.main_version(),
+                                arg
+                            );
+                        } else {
+                            args.push(arg);
+                        }
+                    }
                     Argument::Specify(arg) => {
                         if arg.rules.is_allowed() {
                             for value in arg.value.iter() {
-                                args.push(value.to_owned())
+                                if should_skip_jvm_arg(value, java_runtime.main_version()) {
+                                    tracing::debug!(
+                                        "当前 Java {} 不支持参数 {}，已跳过",
+                                        java_runtime.main_version(),
+                                        value
+                                    );
+                                } else {
+                                    args.push(value.to_owned());
+                                }
                             }
                         }
                     }
@@ -714,8 +788,13 @@ impl Display for Client {
 
 #[cfg(test)]
 mod tests {
-    use super::auth_xuid;
-    use crate::{auth::structs::AuthMethod, password::Password};
+    use std::{
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::{auth_xuid, should_skip_jvm_arg, Client, ClientConfig};
+    use crate::{auth::structs::AuthMethod, java::JavaRuntime, password::Password};
 
     fn microsoft(xuid: &str) -> AuthMethod {
         AuthMethod::Microsoft {
@@ -773,5 +852,254 @@ mod tests {
             "2535401234567890"
         );
         assert_eq!(auth_xuid(&microsoft("")), "0");
+    }
+
+    // ---- Java 版本门槛与 JVM 参数按版本注入 ----
+
+    const JAVA_25_META: &str = r#"{
+        "mainClass": "net.minecraft.client.main.Main",
+        "javaVersion": { "component": "java-runtime-epsilon", "majorVersion": 25 },
+        "arguments": {
+            "game": [],
+            "jvm": [
+                "--sun-misc-unsafe-memory-access=allow",
+                "--enable-native-access=ALL-UNNAMED"
+            ]
+        },
+        "libraries": []
+    }"#;
+
+    const JAVA_21_META_WITH_FLAG: &str = r#"{
+        "mainClass": "net.minecraft.client.main.Main",
+        "javaVersion": { "component": "java-runtime-delta", "majorVersion": 21 },
+        "arguments": {
+            "game": [],
+            "jvm": [
+                "--sun-misc-unsafe-memory-access=allow",
+                "--enable-native-access=ALL-UNNAMED"
+            ]
+        },
+        "libraries": []
+    }"#;
+
+    const NO_JAVA_VERSION_META: &str = r#"{
+        "mainClass": "net.minecraft.client.main.Main",
+        "assetIndex": { "id": "1.21.1", "sha1": "", "size": 0, "totalSize": 0, "url": "" },
+        "arguments": { "game": [], "jvm": [] },
+        "libraries": []
+    }"#;
+
+    static FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
+
+    struct Fixture {
+        dir: PathBuf,
+        version_dir: PathBuf,
+        version_base: String,
+        version_name: String,
+    }
+
+    impl Fixture {
+        fn new(tag: &str, meta: &str) -> Self {
+            let id = FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "scl_java_gate_{tag}_{}_{}",
+                std::process::id(),
+                id
+            ));
+            let _ = fs_err::remove_dir_all(&dir);
+            let versions = dir.join("versions");
+            let version_name = format!("test-{tag}");
+            let version_dir = versions.join(&version_name);
+            fs_err::create_dir_all(&version_dir).unwrap();
+            fs_err::write(version_dir.join(format!("{version_name}.json")), meta).unwrap();
+            Self {
+                version_base: versions.to_string_lossy().to_string(),
+                version_dir,
+                version_name,
+                dir,
+            }
+        }
+
+        fn write_scl_config(&self, content: &str) {
+            fs_err::write(self.version_dir.join(".scl.json"), content).unwrap();
+        }
+
+        fn write_base_version(&self, name: &str, meta: &str) {
+            let base_dir = Path::new(&self.version_base).join(name);
+            fs_err::create_dir_all(&base_dir).unwrap();
+            fs_err::write(base_dir.join(format!("{name}.json")), meta).unwrap();
+        }
+
+        fn config(&self, java_main_version: u8) -> ClientConfig {
+            let mut version_info = crate::version::structs::VersionInfo {
+                version_base: self.version_base.clone(),
+                version: self.version_name.clone(),
+                ..Default::default()
+            };
+            version_info.load().unwrap();
+            ClientConfig {
+                auth: AuthMethod::Offline {
+                    player_name: "Tester".into(),
+                    uuid: "0".repeat(32),
+                },
+                version_info,
+                version_type: "test".into(),
+                custom_java_args: Vec::new(),
+                custom_args: Vec::new(),
+                java_runtime: JavaRuntime::for_test(
+                    "/nonexistent/scl-test-java",
+                    java_main_version,
+                ),
+                max_mem: 1024,
+                recheck: false,
+            }
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs_err::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn build_error(cfg: ClientConfig) -> String {
+        match Client::new(cfg) {
+            Ok(_) => panic!("预期启动被拒绝，但 Client::new 成功了"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    #[test]
+    fn rejects_java_older_than_required() {
+        let fixture = Fixture::new("reject", JAVA_25_META);
+        let err = build_error(fixture.config(21));
+        assert!(err.contains("需要 Java 25"), "{err}");
+        assert!(err.contains("当前选中的 Java 为 21"), "{err}");
+        assert!(err.contains("/nonexistent/scl-test-java"), "{err}");
+    }
+
+    #[test]
+    fn accepts_matching_java_and_injects_flag_on_new_jdk() {
+        let fixture = Fixture::new("accept", JAVA_25_META);
+        let client = Client::new(fixture.config(25)).unwrap();
+        assert_eq!(client.args[0], "/nonexistent/scl-test-java");
+        assert!(client
+            .args
+            .iter()
+            .any(|arg| arg == "--sun-misc-unsafe-memory-access=allow"));
+    }
+
+    #[test]
+    fn skips_unsafe_flag_on_java_21() {
+        // 版本元数据只要求 Java 21 时，门槛会放行，但该参数仍不能塞给 Java 21
+        let fixture = Fixture::new("skip-flag", JAVA_21_META_WITH_FLAG);
+        let client = Client::new(fixture.config(21)).unwrap();
+        assert!(!client
+            .args
+            .iter()
+            .any(|arg| arg.starts_with("--sun-misc-unsafe-memory-access")));
+        assert!(client
+            .args
+            .iter()
+            .any(|arg| arg == "--enable-native-access=ALL-UNNAMED"));
+    }
+
+    #[test]
+    fn missing_java_version_uses_reasonable_fallback() {
+        // 缺失 javaVersion 时按资源索引里的游戏版本回退到 Java 21
+        let fixture = Fixture::new("fallback", NO_JAVA_VERSION_META);
+        let err = build_error(fixture.config(8));
+        assert!(err.contains("需要 Java 21"), "{err}");
+        let client = Client::new(fixture.config(21)).unwrap();
+        assert!(client
+            .args
+            .iter()
+            .any(|arg| arg == "net.minecraft.client.main.Main"));
+    }
+
+    #[test]
+    fn empty_java_path_uses_default_runtime() {
+        // 版本独立配置存在但 java_path 为空时，应使用传入的默认运行时
+        let fixture = Fixture::new("default-runtime", JAVA_21_META_WITH_FLAG);
+        fixture.write_scl_config(r#"{"java_path":""}"#);
+        let client = Client::new(fixture.config(21)).unwrap();
+        assert_eq!(client.args[0], "/nonexistent/scl-test-java");
+    }
+
+    #[test]
+    fn unknown_java_version_is_rejected() {
+        let fixture = Fixture::new("unknown", JAVA_25_META);
+        let err = build_error(fixture.config(0));
+        assert!(err.contains("无法识别所选 Java 运行时的版本"), "{err}");
+        assert!(err.contains("需要 Java 25"), "{err}");
+    }
+
+    #[test]
+    fn inherited_java_version_gates_loader_versions() {
+        // NeoForge 等加载器的版本 JSON 往往没有 javaVersion，要求来自被继承的原版元数据
+        let fixture = Fixture::new(
+            "loader",
+            r#"{
+                "mainClass": "net.neoforged.fml.startup.Client",
+                "inheritsFrom": "test-base-25",
+                "arguments": { "game": [], "jvm": [] },
+                "libraries": []
+            }"#,
+        );
+        fixture.write_base_version("test-base-25", JAVA_25_META);
+        let err = build_error(fixture.config(21));
+        assert!(err.contains("需要 Java 25"), "{err}");
+        let client = Client::new(fixture.config(25)).unwrap();
+        assert!(client
+            .args
+            .iter()
+            .any(|arg| arg == "--sun-misc-unsafe-memory-access=allow"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejection_does_not_spawn_java_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new("no-spawn", JAVA_25_META);
+        let marker = fixture.dir.join("spawned");
+        let fake_java = fixture.dir.join("fake-java");
+        fs_err::write(
+            &fake_java,
+            format!("#!/bin/sh\ntouch {}\n", marker.display()),
+        )
+        .unwrap();
+        let mut permissions = fs_err::metadata(&fake_java).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs_err::set_permissions(&fake_java, permissions).unwrap();
+
+        let mut cfg = fixture.config(21);
+        cfg.java_runtime = JavaRuntime::for_test(fake_java.to_str().unwrap(), 21);
+        let err = build_error(cfg);
+        assert!(err.contains("需要 Java 25"), "{err}");
+        assert!(
+            !Path::new(&marker).exists(),
+            "版本门槛拒绝后不应拉起 Java 进程"
+        );
+    }
+
+    #[test]
+    fn unsafe_flag_is_only_kept_from_jdk_23() {
+        assert!(should_skip_jvm_arg(
+            "--sun-misc-unsafe-memory-access=allow",
+            21
+        ));
+        assert!(should_skip_jvm_arg(
+            "--sun-misc-unsafe-memory-access=allow",
+            0
+        ));
+        assert!(!should_skip_jvm_arg(
+            "--sun-misc-unsafe-memory-access=allow",
+            23
+        ));
+        assert!(!should_skip_jvm_arg(
+            "--enable-native-access=ALL-UNNAMED",
+            21
+        ));
     }
 }

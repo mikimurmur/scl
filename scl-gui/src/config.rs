@@ -1002,8 +1002,13 @@ mod config_migration_tests {
         assert_eq!(config.java_for_version(21).unwrap().main_version, 16);
 
         // 官方样例本身已是官方字段顺序，完整往返应逐字节一致。
+        // Java 条目按当前构建架构重新写出，因此期望值要替换成当前架构。
         let json = pretty(&config);
-        assert_eq!(json, OFFICIAL_CONFIG);
+        let expected = OFFICIAL_CONFIG.replace(
+            "\"arch\": \"x86_64\"",
+            &format!("\"arch\": \"{}\"", std::env::consts::ARCH),
+        );
+        assert_eq!(json, expected);
         assert_top_level_order(&json);
         assert_java_entry_order(first_java_object(&json));
     }

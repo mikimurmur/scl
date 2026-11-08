@@ -55,6 +55,12 @@ jobs:
         with:
           cache-on-failure: true
 
+      # taskbar_interface 的 windows = "*" 会解析到 windows 0.62，其
+      # HWND(*mut c_void) 与该 crate 的 `as isize` 写法冲突；固定到 0.52。
+      - name: Windows - 固定 windows 依赖版本
+        if: runner.os == 'Windows'
+        run: cargo update -p windows@0.62.2 --precise 0.52.0
+
       - name: cargo check
         run: cargo check --workspace --all-targets
 

@@ -56,6 +56,11 @@ jobs:
             echo "VERSION=dev-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
           fi
 
+      # 与 CI 相同：固定 taskbar_interface 依赖的 windows 版本，避免 HWND 类型不匹配。
+      - name: Windows - 固定 windows 依赖版本
+        if: runner.os == 'Windows'
+        run: cargo update -p windows@0.62.2 --precise 0.52.0
+
       - name: 构建（Linux / Windows）
         if: runner.os != 'macOS'
         run: cargo build -p sharp_craft_launcher --release

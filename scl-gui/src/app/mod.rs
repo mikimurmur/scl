@@ -15,7 +15,9 @@ pub mod version_setting;
 use std::path::PathBuf;
 
 use druid::{
-    commands, Command, Event, EventCtx, LifeCycle, LifeCycleCtx, Selector, Target, Widget,
+    commands,
+    piet::{PaintBrush, Text, TextLayout, TextLayoutBuilder},
+    Command, Event, EventCtx, LifeCycle, LifeCycleCtx, RenderContext, Selector, Target, Widget,
     WidgetPod,
 };
 use im::Vector;
@@ -476,6 +478,8 @@ pub struct AppWrapper {
     /// 与 [`scl_gui_widgets::widgets::ENABLE_BACK_PAGE`] 保持同步：主页时返回按钮
     /// 隐藏，Esc 也必须无操作。快捷键不直接看页面链，避免出现第二套导航判断。
     back_page_enabled: bool,
+    /// 主页启动按钮悬停时显示的完整版本名（仅版本名被省略时需要）。
+    version_tooltip: Option<String>,
 }
 
 impl AppWrapper {
@@ -487,6 +491,7 @@ impl AppWrapper {
             last_page: String::new(),
             next_on_page_is_pop: false,
             back_page_enabled: false,
+            version_tooltip: None,
         }
     }
 
@@ -497,7 +502,13 @@ impl AppWrapper {
     }
 
     fn handle_command(&mut self, ctx: &mut EventCtx, cmd: &Command, data: &mut AppState) -> bool {
-        if let Some(enable) = cmd.get(scl_gui_widgets::widgets::ENABLE_BACK_PAGE) {
+        if let Some(tooltip) = cmd.get(scl_gui_widgets::widgets::VERSION_NAME_TOOLTIP) {
+            if self.version_tooltip != *tooltip {
+                self.version_tooltip = tooltip.to_owned();
+                ctx.request_paint();
+            }
+            return true;
+        } else if let Some(enable) = cmd.get(scl_gui_widgets::widgets::ENABLE_BACK_PAGE) {
             self.back_page_enabled = *enable;
             return true;
         } else if let Some(name) = cmd.get(SELECT_VERSION) {
@@ -1411,6 +1422,8 @@ impl AppWrapper {
 
     fn on_page(&mut self, ctx: &mut EventCtx, data: &mut AppState, page: &str) {
         tracing::debug!("on_page: {page:?}");
+        // 页面切换后旧页面的悬停提示不应残留。
+        self.version_tooltip = None;
         // ON_PAGE 同时用于 push 与 pop；只有 push 才执行「进入页面」逻辑。
         let is_pop = std::mem::take(&mut self.next_on_page_is_pop);
         // 仅在「从启动中页面切到其它页面」时清空贴士。不能在任意
@@ -1639,6 +1652,52 @@ impl Widget<AppState> for AppWrapper {
 
     fn paint(&mut self, ctx: &mut druid::PaintCtx, data: &AppState, env: &druid::Env) {
         self.inner.paint(ctx, data, env);
+        self.paint_version_tooltip(ctx, env);
+    }
+}
+
+impl AppWrapper {
+    /// 绘制主页启动按钮的完整版本名提示。
+    ///
+    /// 提示必须画在根组件上：按钮自身的 `WidgetPod` 会被裁到按钮矩形，
+    /// 无法在按钮上方显示内容。
+    fn paint_version_tooltip(&self, ctx: &mut druid::PaintCtx, env: &druid::Env) {
+        let Some(text) = &self.version_tooltip else {
+            return;
+        };
+        let max_width = (ctx.size().width - 24.).max(100.);
+        let font = env.get(scl_gui_widgets::theme::color::typography::CAPTION_ALT);
+        let Ok(layout) = ctx
+            .text()
+            .new_text_layout(text.clone())
+            .font(font.family.clone(), font.size)
+            .text_color(env.get(scl_gui_widgets::theme::color::typography::FONT_COLOR))
+            .alignment(druid::TextAlignment::Start)
+            .max_width(max_width)
+            .build()
+        else {
+            return;
+        };
+        let padding = 6.;
+        let width = layout.size().width + padding * 2.;
+        let height = layout.size().height + padding * 2.;
+        let x = (ctx.size().width - width) / 2.;
+        // 主界面底部栏：窗口底 - 4 padding - 40 spacer - 62 栏高，提示再上移 8。
+        let y = ctx.size().height - 106. - 8. - height;
+        if y < 0. {
+            return;
+        }
+        let rect = druid::Rect::from_origin_size((x, y), (width, height)).to_rounded_rect(4.);
+        ctx.fill(
+            &rect,
+            &PaintBrush::Color(env.get(scl_gui_widgets::theme::color::chrome::MEDIUM_LOW)),
+        );
+        ctx.stroke(
+            &rect,
+            &PaintBrush::Color(env.get(scl_gui_widgets::theme::color::border::TRANSIENT)),
+            1.,
+        );
+        ctx.draw_text(&layout, (x + padding, y + padding));
     }
 }
 

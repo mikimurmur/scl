@@ -160,18 +160,6 @@ fn auth_xuid(auth: &AuthMethod) -> String {
     }
 }
 
-/// `--sun-misc-unsafe-memory-access` 参数的起始文本
-const SUN_MISC_UNSAFE_MEMORY_ACCESS_ARG: &str = "--sun-misc-unsafe-memory-access";
-
-/// 该参数由 JDK 23 引入，低于此版本的 Java 会把它当作未知参数并拒绝启动
-const SUN_MISC_UNSAFE_MEMORY_ACCESS_MIN_JAVA: u8 = 23;
-
-/// 判断版本元数据里的 JVM 参数是否需要因为运行时版本过低而跳过
-fn should_skip_jvm_arg(arg: &str, java_main_version: u8) -> bool {
-    arg.starts_with(SUN_MISC_UNSAFE_MEMORY_ACCESS_ARG)
-        && java_main_version < SUN_MISC_UNSAFE_MEMORY_ACCESS_MIN_JAVA
-}
-
 /// 启动前校验实际选中的 Java 运行时是否满足版本元数据要求
 ///
 /// 不满足时直接返回错误，由调用方转成启动失败提示；此时尚未构造任何启动参数，
@@ -515,30 +503,11 @@ impl Client {
         if let Some(arguments) = &meta.arguments {
             for arg in &arguments.jvm {
                 match arg {
-                    Argument::Common(arg) => {
-                        let arg = replace_each(&variables, arg.to_owned());
-                        if should_skip_jvm_arg(&arg, java_runtime.main_version()) {
-                            tracing::debug!(
-                                "当前 Java {} 不支持参数 {}，已跳过",
-                                java_runtime.main_version(),
-                                arg
-                            );
-                        } else {
-                            args.push(arg);
-                        }
-                    }
+                    Argument::Common(arg) => args.push(replace_each(&variables, arg.to_owned())),
                     Argument::Specify(arg) => {
                         if arg.rules.is_allowed() {
                             for value in arg.value.iter() {
-                                if should_skip_jvm_arg(value, java_runtime.main_version()) {
-                                    tracing::debug!(
-                                        "当前 Java {} 不支持参数 {}，已跳过",
-                                        java_runtime.main_version(),
-                                        value
-                                    );
-                                } else {
-                                    args.push(value.to_owned());
-                                }
+                                args.push(value.to_owned())
                             }
                         }
                     }
@@ -793,7 +762,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use super::{auth_xuid, should_skip_jvm_arg, Client, ClientConfig};
+    use super::{auth_xuid, Client, ClientConfig};
     use crate::{auth::structs::AuthMethod, java::JavaRuntime, password::Password};
 
     fn microsoft(xuid: &str) -> AuthMethod {
@@ -854,24 +823,11 @@ mod tests {
         assert_eq!(auth_xuid(&microsoft("")), "0");
     }
 
-    // ---- Java 版本门槛与 JVM 参数按版本注入 ----
+    // ---- Java 版本门槛 ----
 
     const JAVA_25_META: &str = r#"{
         "mainClass": "net.minecraft.client.main.Main",
         "javaVersion": { "component": "java-runtime-epsilon", "majorVersion": 25 },
-        "arguments": {
-            "game": [],
-            "jvm": [
-                "--sun-misc-unsafe-memory-access=allow",
-                "--enable-native-access=ALL-UNNAMED"
-            ]
-        },
-        "libraries": []
-    }"#;
-
-    const JAVA_21_META_WITH_FLAG: &str = r#"{
-        "mainClass": "net.minecraft.client.main.Main",
-        "javaVersion": { "component": "java-runtime-delta", "majorVersion": 21 },
         "arguments": {
             "game": [],
             "jvm": [
@@ -979,29 +935,21 @@ mod tests {
     }
 
     #[test]
-    fn accepts_matching_java_and_injects_flag_on_new_jdk() {
+    fn satisfied_java_forwards_metadata_jvm_args_in_order() {
+        // 满足版本要求后，元数据 arguments.jvm 原样、按顺序进入最终参数
         let fixture = Fixture::new("accept", JAVA_25_META);
         let client = Client::new(fixture.config(25)).unwrap();
         assert_eq!(client.args[0], "/nonexistent/scl-test-java");
-        assert!(client
-            .args
+        let jvm_args: Vec<&str> = client.args.iter().map(String::as_str).collect();
+        let expected = [
+            "--sun-misc-unsafe-memory-access=allow",
+            "--enable-native-access=ALL-UNNAMED",
+        ];
+        let start = jvm_args
             .iter()
-            .any(|arg| arg == "--sun-misc-unsafe-memory-access=allow"));
-    }
-
-    #[test]
-    fn skips_unsafe_flag_on_java_21() {
-        // 版本元数据只要求 Java 21 时，门槛会放行，但该参数仍不能塞给 Java 21
-        let fixture = Fixture::new("skip-flag", JAVA_21_META_WITH_FLAG);
-        let client = Client::new(fixture.config(21)).unwrap();
-        assert!(!client
-            .args
-            .iter()
-            .any(|arg| arg.starts_with("--sun-misc-unsafe-memory-access")));
-        assert!(client
-            .args
-            .iter()
-            .any(|arg| arg == "--enable-native-access=ALL-UNNAMED"));
+            .position(|arg| *arg == expected[0])
+            .expect("元数据里的 JVM 参数未被转发");
+        assert_eq!(&jvm_args[start..start + expected.len()], &expected[..]);
     }
 
     #[test]
@@ -1020,9 +968,9 @@ mod tests {
     #[test]
     fn empty_java_path_uses_default_runtime() {
         // 版本独立配置存在但 java_path 为空时，应使用传入的默认运行时
-        let fixture = Fixture::new("default-runtime", JAVA_21_META_WITH_FLAG);
+        let fixture = Fixture::new("default-runtime", JAVA_25_META);
         fixture.write_scl_config(r#"{"java_path":""}"#);
-        let client = Client::new(fixture.config(21)).unwrap();
+        let client = Client::new(fixture.config(25)).unwrap();
         assert_eq!(client.args[0], "/nonexistent/scl-test-java");
     }
 
@@ -1081,25 +1029,5 @@ mod tests {
             !Path::new(&marker).exists(),
             "版本门槛拒绝后不应拉起 Java 进程"
         );
-    }
-
-    #[test]
-    fn unsafe_flag_is_only_kept_from_jdk_23() {
-        assert!(should_skip_jvm_arg(
-            "--sun-misc-unsafe-memory-access=allow",
-            21
-        ));
-        assert!(should_skip_jvm_arg(
-            "--sun-misc-unsafe-memory-access=allow",
-            0
-        ));
-        assert!(!should_skip_jvm_arg(
-            "--sun-misc-unsafe-memory-access=allow",
-            23
-        ));
-        assert!(!should_skip_jvm_arg(
-            "--enable-native-access=ALL-UNNAMED",
-            21
-        ));
     }
 }

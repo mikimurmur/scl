@@ -48,8 +48,8 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
     let info = OptionView::new(ModListItem::new_static(), SizedBox::empty())
         .lens(AppState::mod_file_downloads_info);
 
-    let list = OptionView::new(files_view(), loading_view())
-        .lens(AppState::mod_file_downloads_files);
+    let list =
+        OptionView::new(files_view(), loading_view()).lens(AppState::mod_file_downloads_files);
 
     Box::new(
         Flex::column()

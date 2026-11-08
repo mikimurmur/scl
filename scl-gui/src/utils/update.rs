@@ -45,9 +45,14 @@ pub fn latest_version() -> anyhow::Result<String> {
             Ok(response) => {
                 // 不校验状态码会把 WAF/CDN 拦截页当版本号（OB-17 表现），先验状态码
                 if !response.is_success() {
-                    tracing::error!("无法获取最新版本号：{url} 返回了非成功的状态码 {}", response.status());
-                    last_error =
-                        Some(anyhow::anyhow!("{url} 返回了非成功的状态码 {}", response.status()));
+                    tracing::error!(
+                        "无法获取最新版本号：{url} 返回了非成功的状态码 {}",
+                        response.status()
+                    );
+                    last_error = Some(anyhow::anyhow!(
+                        "{url} 返回了非成功的状态码 {}",
+                        response.status()
+                    ));
                     continue;
                 }
                 let Ok(text) = response.into_string() else {
@@ -66,9 +71,12 @@ pub fn latest_version() -> anyhow::Result<String> {
                 }
                 // 响应体必须形如版本号：拦截页/错误页 HTML 一律视为失败并换下一个源
                 if !is_version_like(trimmed) {
-                    tracing::error!("无法获取最新版本号：{url} 返回了非版本号内容（可能被网络拦截），已忽略");
-                    last_error =
-                        Some(anyhow::anyhow!("{url} 返回了非版本号内容（可能被网络拦截）"));
+                    tracing::error!(
+                        "无法获取最新版本号：{url} 返回了非版本号内容（可能被网络拦截），已忽略"
+                    );
+                    last_error = Some(anyhow::anyhow!(
+                        "{url} 返回了非版本号内容（可能被网络拦截）"
+                    ));
                     continue;
                 }
                 return Ok(trimmed.to_owned());

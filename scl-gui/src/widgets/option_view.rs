@@ -36,7 +36,13 @@ impl<T: Data + Default> Widget<Option<T>> for OptionView<T> {
         }
     }
 
-    fn lifecycle(&mut self, ctx: &mut LifeCycleCtx, event: &LifeCycle, data: &Option<T>, env: &Env) {
+    fn lifecycle(
+        &mut self,
+        ctx: &mut LifeCycleCtx,
+        event: &LifeCycle,
+        data: &Option<T>,
+        env: &Env,
+    ) {
         if let LifeCycle::WidgetAdded = event {
             // 关键：两个 child 都先收到 WidgetAdded（some 在 None 时用默认值初始化），
             // 之后任何 BuildFocusChain 都不会早于 WidgetAdded。

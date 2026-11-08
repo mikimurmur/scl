@@ -163,4 +163,3 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
             .expand(),
     )
 }
-

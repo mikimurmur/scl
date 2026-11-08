@@ -3,7 +3,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use druid::{
-    widget::{Align, Click, ControllerHost, CrossAxisAlignment, Either, Flex, List, Scroll, SizedBox},
+    widget::{
+        Align, Click, ControllerHost, CrossAxisAlignment, Either, Flex, List, Scroll, SizedBox,
+    },
     Insets, Target, UnitPoint, Widget, WidgetExt,
 };
 use im::Vector;
@@ -81,7 +83,11 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
     // 稳定 OptionView（替代 druid Maybe，避免 None↔Some 切换触发
     // BuildFocusChain-before-WidgetAdded 断言，详见 widgets/option_view.rs）。
     let content = OptionView::new(
-        Either::new(|mods: &Vector<ModState>, _| !mods.is_empty(), results_view(), empty_view()),
+        Either::new(
+            |mods: &Vector<ModState>, _| !mods.is_empty(),
+            results_view(),
+            empty_view(),
+        ),
         loading_view(),
     )
     .lens(AppState::mods_download_modrinth_result_mods)
@@ -107,8 +113,8 @@ impl<W: Widget<AppState>> druid::widget::Controller<AppState, W> for SearchOnCha
         data: &AppState,
         env: &druid::Env,
     ) {
-        let changed =
-            old_data.mods_download_modrinth_search_filter != data.mods_download_modrinth_search_filter;
+        let changed = old_data.mods_download_modrinth_search_filter
+            != data.mods_download_modrinth_search_filter;
         if changed {
             // 页面打开时程序化清空输入框：若置了抑制位且新值为空，则不再重复发请求。
             let suppressed = SKIP_NEXT_INPUT_SEARCH.swap(false, Ordering::SeqCst);

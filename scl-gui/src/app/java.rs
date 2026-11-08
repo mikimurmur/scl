@@ -349,9 +349,6 @@ mod tests {
             .unwrap()
             .contains("未能识别任何 Java 运行时"));
         assert!(scan_notice(2, 1).unwrap().contains("已跳过 1 个"));
-        assert_eq!(
-            scan_notice(0, 0).unwrap(),
-            "没有找到可用的 Java 运行时"
-        );
+        assert_eq!(scan_notice(0, 0).unwrap(), "没有找到可用的 Java 运行时");
     }
 }

@@ -123,10 +123,7 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
         .with_placeholder("搜索模组……")
         .lens(AppState::version_mods_search_filter)
         .controller(OnChange::new(
-            |_ctx: &mut druid::EventCtx,
-             _old: &AppState,
-             data: &mut AppState,
-             _env: &Env| {
+            |_ctx: &mut druid::EventCtx, _old: &AppState, data: &mut AppState, _env: &Env| {
                 data.rebuild_mods_filter();
             },
         ))

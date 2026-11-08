@@ -67,9 +67,7 @@ fn decode_api_body<T: DeserializeOwned>(status: u16, body: &str, action: &str) -
     check_api_status(status, action)?;
     let trimmed = body.trim();
     if trimmed.is_empty() {
-        anyhow::bail!(
-            "CurseForge {action}返回为空（HTTP {status}），请检查 API key 与网络连接"
-        );
+        anyhow::bail!("CurseForge {action}返回为空（HTTP {status}），请检查 API key 与网络连接");
     }
     if trimmed.starts_with('<') {
         anyhow::bail!(

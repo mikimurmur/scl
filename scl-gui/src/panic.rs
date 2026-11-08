@@ -56,12 +56,13 @@ pub fn show_background_error_dialog(location: impl Into<String>, error: impl Int
 }
 
 #[cfg(target_os = "linux")]
-fn background_error_dialogs() -> &'static std::sync::Mutex<std::collections::VecDeque<(String, String)>>
-{
+fn background_error_dialogs(
+) -> &'static std::sync::Mutex<std::collections::VecDeque<(String, String)>> {
     static BACKGROUND_ERROR_DIALOGS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::VecDeque<(String, String)>>,
     > = std::sync::OnceLock::new();
-    BACKGROUND_ERROR_DIALOGS.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+    BACKGROUND_ERROR_DIALOGS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
 }
 
 /// 测试专用：当前错误弹窗队列的快照（位置, 错误）。
@@ -188,11 +189,7 @@ pub fn show_background_error_dialog(location: impl Into<String>, error: impl Int
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn show_background_error_dialog(location: impl Into<String>, error: impl Into<String>) {
-    tracing::warn!(
-        "后台任务发生错误（{}）：{}",
-        location.into(),
-        error.into()
-    );
+    tracing::warn!("后台任务发生错误（{}）：{}", location.into(), error.into());
 }
 
 #[cfg(target_os = "windows")]

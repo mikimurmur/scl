@@ -903,10 +903,7 @@ mod tests {
         let config = Config::default();
         assert!(config.auto_mem_size);
         assert_eq!(AppState::initial_memory_input(&config), "");
-        assert_eq!(
-            AppState::new(config).setting_launch_java_memory_size,
-            ""
-        );
+        assert_eq!(AppState::new(config).setting_launch_java_memory_size, "");
     }
 
     #[test]

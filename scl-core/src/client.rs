@@ -4,9 +4,8 @@ use std::{
     ffi::OsString,
     fmt::{Display, Formatter, Result},
     path::Path,
+    process::{Child, Command},
 };
-
-use std::process::{Child, Command};
 
 use super::{
     auth::structs::AuthMethod,
@@ -769,7 +768,10 @@ mod tests {
 
     #[test]
     fn microsoft_accounts_use_real_xuid_with_zero_fallback() {
-        assert_eq!(auth_xuid(&microsoft("2535401234567890")), "2535401234567890");
+        assert_eq!(
+            auth_xuid(&microsoft("2535401234567890")),
+            "2535401234567890"
+        );
         assert_eq!(auth_xuid(&microsoft("")), "0");
     }
 }

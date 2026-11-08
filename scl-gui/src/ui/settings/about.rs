@@ -68,11 +68,9 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
                 .disabled_if(|data: &AppState, _env| {
                     data.update_available.as_deref().map_or(true, str::is_empty)
                 })
-                .on_click(
-                    |ctx: &mut EventCtx, data: &mut AppState, env: &Env| {
-                        on_check_update(ctx, data, env);
-                    },
-                ),
+                .on_click(|ctx: &mut EventCtx, data: &mut AppState, env: &Env| {
+                    on_check_update(ctx, data, env);
+                }),
             1.0,
         )
         .with_spacer(5.)
@@ -80,12 +78,12 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
             Button::new("立即更新")
                 .with_accent(true)
                 .expand_width()
-                .disabled_if(|data: &AppState, _env| match data.update_available.as_deref() {
-                    None => true,
-                    Some(version) => {
-                        version.is_empty() || version == env!("CARGO_PKG_VERSION")
-                    }
-                })
+                .disabled_if(
+                    |data: &AppState, _env| match data.update_available.as_deref() {
+                        None => true,
+                        Some(version) => version.is_empty() || version == env!("CARGO_PKG_VERSION"),
+                    },
+                )
                 .on_click(|ctx: &mut EventCtx, _data: &mut AppState, _env: &Env| {
                     ctx.submit_command(
                         crate::ui::PUSH_PAGE

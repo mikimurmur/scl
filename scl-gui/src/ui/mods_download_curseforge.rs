@@ -1,7 +1,9 @@
 //! CurseForge 模组搜索页面。
 
 use druid::{
-    widget::{Align, Click, ControllerHost, CrossAxisAlignment, Either, Flex, List, Scroll, SizedBox},
+    widget::{
+        Align, Click, ControllerHost, CrossAxisAlignment, Either, Flex, List, Scroll, SizedBox,
+    },
     Insets, Target, UnitPoint, Widget, WidgetExt,
 };
 use im::Vector;
@@ -53,20 +55,12 @@ fn results_view() -> impl Widget<Vector<ModState>> {
 /// 搜索完成但结果为空时的分支：内容区居中的「没有结果」
 fn empty_view() -> impl Widget<Vector<ModState>> {
     // 官方此处只调用 label::new("没有结果")，文字颜色/字号沿用主题默认值。
-    SizedBox::new(Align::new(
-        UnitPoint::CENTER,
-        label::new("没有结果"),
-    ))
-    .expand()
+    SizedBox::new(Align::new(UnitPoint::CENTER, label::new("没有结果"))).expand()
 }
 
 /// 请求进行中的分支（结果列表为 None）：内容区居中的转圈
 fn loading_view() -> impl Widget<()> {
-    SizedBox::new(Align::new(
-        UnitPoint::CENTER,
-        ProgressRing::new(),
-    ))
-    .expand()
+    SizedBox::new(Align::new(UnitPoint::CENTER, ProgressRing::new())).expand()
 }
 
 /// 创建 CurseForge 搜索页面
@@ -95,7 +89,11 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
     // 会重建 child pod 并把 BuildFocusChain 提前发给未 WidgetAdded 的新 pod，
     // 触发 core.rs 断言（见 option_view.rs 注释）。
     let content = OptionView::new(
-        Either::new(|mods: &Vector<ModState>, _| !mods.is_empty(), results_view(), empty_view()),
+        Either::new(
+            |mods: &Vector<ModState>, _| !mods.is_empty(),
+            results_view(),
+            empty_view(),
+        ),
         loading_view(),
     )
     .lens(AppState::mods_download_curseforge_result_mods);
@@ -104,9 +102,7 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
         Flex::column()
             .with_child(toolbar)
             .with_flex_child(content, 1.0)
-            .disabled_if(|data: &AppState, _: &druid::Env| {
-                data.mods_download_curseforge_searching
-            }),
+            .disabled_if(|data: &AppState, _: &druid::Env| data.mods_download_curseforge_searching),
     )
 }
 

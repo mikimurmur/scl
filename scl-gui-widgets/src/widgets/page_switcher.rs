@@ -294,9 +294,7 @@ impl<T: Data> Widget<T> for PageSwitcher<T> {
                         tracing::trace!("WARNING: Back page invoked when the page is only one!");
                         None
                     }
-                } else if let Some(page) =
-                    self.page_chain.iter().copied().find(|p| p == to_page)
-                {
+                } else if let Some(page) = self.page_chain.iter().copied().find(|p| p == to_page) {
                     Some(page)
                 } else {
                     tracing::trace!("WARNING: Can't find page {to_page:?} in page chain");
@@ -314,9 +312,7 @@ impl<T: Data> Widget<T> for PageSwitcher<T> {
                             self.enqueue_pop(ctx, target);
                         }
                     } else {
-                        tracing::debug!(
-                            "animation in progress, drop pop request to {target:?}"
-                        );
+                        tracing::debug!("animation in progress, drop pop request to {target:?}");
                     }
                 }
             } else if let Some(to_page) = cmd.get(RESET_PAGE_TO) {

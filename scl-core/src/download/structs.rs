@@ -168,14 +168,12 @@ mod tests {
     /// pre-1.6 索引带 `map_to_resources: true`；缺省标志时两者都为 false。
     #[test]
     fn parses_map_to_resources_and_defaults() {
-        let index: AssetIndexes =
-            serde_json::from_str(r#"{"map_to_resources":true,"objects":{}}"#)
-                .expect("解析 pre-1.6 索引");
+        let index: AssetIndexes = serde_json::from_str(r#"{"map_to_resources":true,"objects":{}}"#)
+            .expect("解析 pre-1.6 索引");
         assert!(!index.is_virtual);
         assert!(index.map_to_resources);
 
-        let modern: AssetIndexes =
-            serde_json::from_str(r#"{"objects":{}}"#).expect("解析现代索引");
+        let modern: AssetIndexes = serde_json::from_str(r#"{"objects":{}}"#).expect("解析现代索引");
         assert!(!modern.is_virtual);
         assert!(!modern.map_to_resources);
     }

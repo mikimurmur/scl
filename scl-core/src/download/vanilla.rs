@@ -1,6 +1,11 @@
 //! 原版游戏的下载模块
 
-use std::{borrow::Cow, collections::HashMap, collections::HashSet, path::Path, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    path::Path,
+    time::Duration,
+};
 
 use anyhow::Context;
 use tracing::*;
@@ -67,12 +72,7 @@ fn download_with_sources(
 ///
 /// `verify_data=false` 时只校验大小（P0「修复默认只补缺失」）；只有显式启用
 /// 深度校验时才计算 SHA1。期望大小为 0 或 SHA1 为空表示跳过对应检查。
-fn local_file_matches(
-    path: &Path,
-    sha1: &str,
-    size: u64,
-    verify_data: bool,
-) -> DynResult<bool> {
+fn local_file_matches(path: &Path, sha1: &str, size: u64, verify_data: bool) -> DynResult<bool> {
     if !path.is_file() {
         return Ok(false);
     }
@@ -114,22 +114,12 @@ pub trait VanillaDownloadExt: Sync {
     fn get_avaliable_vanilla_versions(&self) -> DynResult<VersionManifest>;
 
     /// 下载原版客户端 JAR 文件
-    fn download_vanilla_jar(
-        &self,
-        path: &str,
-        save_path: &str,
-        sha1: &str,
-        size: u64,
-    ) -> DynResult;
+    fn download_vanilla_jar(&self, path: &str, save_path: &str, sha1: &str, size: u64)
+        -> DynResult;
 
     /// 下载一个依赖库，并存放到指定位置
-    fn download_library(
-        &self,
-        sha1: String,
-        path: String,
-        size: u64,
-        save_path: &str,
-    ) -> DynResult;
+    fn download_library(&self, sha1: String, path: String, size: u64, save_path: &str)
+        -> DynResult;
 
     /// 下载一组依赖库，安装位置由特质实现而定
     fn download_libraries(&self, libraries: &[Library]) -> DynResult<HashMap<String, Vec<String>>>;
@@ -623,7 +613,10 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             .filter(|(_, obj)| seen_hashes.insert(obj.hash.clone()))
             .filter(|(_, obj)| {
                 !local_file_matches(
-                    Path::new(&asset_object_path(&minecraft_assets_objects_path, &obj.hash)),
+                    Path::new(&asset_object_path(
+                        &minecraft_assets_objects_path,
+                        &obj.hash,
+                    )),
                     &obj.hash,
                     obj.size as u64,
                     self.verify_data,
@@ -839,10 +832,8 @@ mod tests {
     /// 索引文件存在且可解析时必须复用，不能发起网络请求。
     #[test]
     fn reuses_existing_asset_index() {
-        let dir = std::env::temp_dir().join(format!(
-            "scl_asset_index_reuse_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("scl_asset_index_reuse_{}", std::process::id()));
         let _ = fs_err::remove_dir_all(&dir);
         fs_err::create_dir_all(dir.join("assets").join("indexes")).expect("创建索引目录");
         fs_err::write(
@@ -853,11 +844,7 @@ mod tests {
         let downloader: Downloader<()> = Downloader::default().with_minecraft_path(&dir);
         let assets_path = dir.join("assets").to_string_lossy().to_string();
         let index = downloader
-            .download_asset_index(
-                "legacy",
-                "http://127.0.0.1:1/unreachable",
-                &assets_path,
-            )
+            .download_asset_index("legacy", "http://127.0.0.1:1/unreachable", &assets_path)
             .expect("已存在的索引应直接复用");
         assert!(index.is_virtual);
         assert!(index.objects.is_empty());

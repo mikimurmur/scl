@@ -2,6 +2,7 @@
 use std::{
     collections::VecDeque,
     io::{BufRead, Read, Write},
+    path::PathBuf,
     process::Stdio,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -84,6 +85,22 @@ fn installer_failure_summary(tail: &[String]) -> Vec<String> {
     }
     summary.truncate(MAX_SUMMARY_LINES);
     summary
+}
+
+/// 安装器运行产生的一次性文件，离开作用域时尽力清理
+///
+/// 安装器会把自身日志写到进程 CWD，而启动器可能从任意目录启动；运行结束后
+/// 无论成功、失败还是提前返回，都不应把改写后的安装器 JAR 与日志留在用户目录。
+struct InstallerTempFiles {
+    installer_jar: PathBuf,
+    installer_log: PathBuf,
+}
+
+impl Drop for InstallerTempFiles {
+    fn drop(&mut self) {
+        let _ = fs_err::remove_file(&self.installer_jar);
+        let _ = fs_err::remove_file(&self.installer_log);
+    }
 }
 
 /// 安装器输出是否表明失败来自库下载（可凭已落盘文件重试恢复）
@@ -255,16 +272,41 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
             mc = version_id,
             neoforge = neoforge_version
         );
+        let tempid = std::time::SystemTime::now()
+            .elapsed()
+            .unwrap_or_default()
+            .as_secs();
+        let tmp_name = format!(
+            "neoforge-{mc}-{neoforge}-installer.tmp.{tempid}.jar",
+            mc = version_id,
+            neoforge = neoforge_version
+        );
         let tmp_full_path = format!(
-            "{root}/net/neoforged/neoforge/{mc}-{neoforge}/neoforge-{mc}-{neoforge}-installer.tmp.{tempid}.jar",
+            "{root}/net/neoforged/neoforge/{mc}-{neoforge}/{tmp_name}",
             root = self.minecraft_library_path.as_str(),
             mc = version_id,
-            neoforge = neoforge_version,
-            tempid = std::time::SystemTime::now()
-                .elapsed()
-                .unwrap_or_default()
-                .as_secs()
+            neoforge = neoforge_version
         );
+        // 安装器会把自身日志写到进程 CWD；把它固定在游戏目录内，避免启动器
+        // 从任意目录启动时把日志留在用户的当前目录。清理交给 RAII 守卫，
+        // 保证成功、失败与提前返回都不会留下改写后的安装器 JAR 和日志。
+        // `minecraft_folder` 可能是相对路径（CurrentDirectory 对应 `.minecraft`）。
+        // 安装器 CWD 固定到游戏目录后，目标路径也必须是绝对路径，否则会被
+        // 相对解析成 `<游戏目录>/.minecraft`。
+        let minecraft_path = {
+            let path = std::path::Path::new(&self.minecraft_path);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()?.join(path)
+            }
+        };
+        fs_err::create_dir_all(&minecraft_path)?;
+        let installer_log_path = minecraft_path.join(format!("{tmp_name}.log"));
+        let _installer_cleanup = InstallerTempFiles {
+            installer_jar: PathBuf::from(&tmp_full_path),
+            installer_log: installer_log_path,
+        };
         tracing::trace!("Writing temp neoforge installer from {full_path} to {tmp_full_path}");
         {
             let from_file = fs_err::OpenOptions::new().read(true).open(&full_path)?;
@@ -300,16 +342,28 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
         // 必须主动捕获，失败时才能把可定位的尾部输出带进错误信息。
         cmd.stderr(Stdio::piped());
         cmd.stdin(Stdio::null());
+        // 安装器自身日志写到进程 CWD；固定在游戏目录，不能继承启动器的调用目录。
+        cmd.current_dir(&minecraft_path);
+        // `-cp` 由 Java 按安装器进程的 CWD 解析；游戏目录是相对路径时必须
+        // 先把临时安装器 JAR 解析成绝对路径，否则会变成 `<游戏目录>/<相对路径>`。
+        let tmp_full_path_arg = {
+            let path = std::path::Path::new(&tmp_full_path);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()?.join(path)
+            }
+        };
 
         // 使用安装器自身声明的入口类执行无头安装，避免依赖内置 bootstrapper
         // 反射调用固定签名的 main 方法。
         let main_class = super::installer_main_class(&full_path)?;
 
         cmd.arg("-cp");
-        cmd.arg(&tmp_full_path);
+        cmd.arg(&tmp_full_path_arg);
         cmd.arg(main_class);
         cmd.arg("--installClient");
-        cmd.arg(self.minecraft_path.as_str()); // 安装位置
+        cmd.arg(&minecraft_path); // 安装位置
 
         r.add_progress(1.);
         r.set_message("运行 NeoForge 安装器安装 NeoForge".into());
@@ -452,7 +506,7 @@ impl<R: Reporter> NeoForgeDownloadExt for Downloader<R> {
 
         r.add_progress(1.);
         r.remove_progress();
-        fs_err::remove_file(tmp_full_path)?;
+        // 改写后的安装器 JAR 与安装器日志由 `_installer_cleanup` 在离开作用域时清理。
         // 安装器返回 0 只代表进程正常退出；是否装好要看产物是否真的落盘。
         let installed_version_json = std::path::Path::new(&self.minecraft_version_path)
             .join(version_name)
@@ -700,6 +754,26 @@ mod tests {
             tail.back().map(|line| line.chars().count()),
             Some(INSTALLER_OUTPUT_LINE_CHARS)
         );
+    }
+
+    #[test]
+    fn installer_temp_files_are_removed_on_drop() {
+        let dir = std::env::temp_dir().join(format!("scl_neoforge_cleanup_{}", std::process::id()));
+        let _ = fs_err::remove_dir_all(&dir);
+        fs_err::create_dir_all(&dir).expect("创建临时目录");
+        let installer_jar = dir.join("installer.tmp.0.jar");
+        let installer_log = dir.join("installer.tmp.0.jar.log");
+        fs_err::write(&installer_jar, b"jar").expect("写入安装器");
+        fs_err::write(&installer_log, b"log").expect("写入日志");
+        {
+            let _cleanup = InstallerTempFiles {
+                installer_jar: installer_jar.clone(),
+                installer_log: installer_log.clone(),
+            };
+        }
+        assert!(!installer_jar.exists(), "安装器临时 JAR 应被清理");
+        assert!(!installer_log.exists(), "安装器日志应被清理");
+        let _ = fs_err::remove_dir_all(&dir);
     }
 
     #[test]

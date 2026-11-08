@@ -102,6 +102,21 @@ fn main() {
     }
 }
 
+/// 是否存在端到端测试驱动环境变量。
+///
+/// `SCL_MOCK*` / `SCL_AUTO_*` / `SCL_AUTOLAUNCH` / `SCL_START_PAGE` 均为
+/// 无交互测试钩子；测试期间配置也必须落在隔离的 HOME 下，不能读写
+/// 启动器工作目录里的真实 `.scl.json`。
+pub(crate) fn is_test_driver_env() -> bool {
+    let is_test_driver = |key: &str| {
+        key.starts_with("SCL_MOCK")
+            || key.starts_with("SCL_AUTO_")
+            || key == "SCL_AUTOLAUNCH"
+            || key == "SCL_START_PAGE"
+    };
+    std::env::vars_os().any(|(key, _)| key.to_str().map(is_test_driver).unwrap_or(false))
+}
+
 /// 端到端测试钩子的硬性 HOME 隔离防护。
 ///
 /// 只要环境里存在任一测试驱动变量（前缀 `SCL_MOCK`、`SCL_AUTO_`，或
@@ -111,15 +126,7 @@ fn main() {
 /// `$HOME/.scl/`，且主配置在 CWD，家目录没有 .scl.json 不代表没有账户）。
 /// 不依赖人工纪律，在进程入口（读配置之前）强制拦截。
 fn ensure_e2e_home_isolated() {
-    let is_test_driver = |key: &str| {
-        key.starts_with("SCL_MOCK")
-            || key.starts_with("SCL_AUTO_")
-            || key == "SCL_AUTOLAUNCH"
-            || key == "SCL_START_PAGE"
-    };
-    let triggered =
-        std::env::vars_os().any(|(key, _)| key.to_str().map(is_test_driver).unwrap_or(false));
-    if !triggered {
+    if !is_test_driver_env() {
         return; // 正常用户运行不受影响
     }
     let home = std::env::var_os("HOME").unwrap_or_default();

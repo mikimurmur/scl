@@ -204,6 +204,29 @@ pub fn search_for_java() -> Vec<String> {
             }
         }
     }
+
+    /// 版本管理器 / 构建工具 / IDE 常见 JDK 目录。
+    ///
+    /// `check_bin_java_directory` 会把每个子目录当作 JDK 根目录继续拼接
+    /// `bin/java`，因此这里传入的都是包含多个 JDK 的父目录：
+    /// - sdkman：`~/.sdkman/candidates/java`（含各版本目录与 `current` 符号链接）
+    /// - Gradle 工具链：`~/.gradle/jdks`
+    /// - JetBrains IDE：`~/.jdks`
+    fn check_home_java_directories(result: &mut Vec<String>) {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let sdkman = std::env::var_os("SDKMAN_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".sdkman"));
+        check_bin_java_directory(sdkman.join("candidates").join("java"), result);
+        check_bin_java_directory(home.join(".gradle").join("jdks"), result);
+        check_bin_java_directory(home.join(".jdks"), result);
+        // JAVA_HOME 直接指向单个 JDK，可执行文件在 bin 目录下。
+        if let Some(java_home) = std::env::var_os("JAVA_HOME") {
+            check_java(PathBuf::from(java_home).join("bin"), result);
+        }
+    }
     #[cfg(windows)]
     {
         let mut result = Vec::with_capacity(16);
@@ -299,6 +322,7 @@ pub fn search_for_java() -> Vec<String> {
             let path = PathBuf::from(path).join("jdk");
             check_bin_java_directory(path.as_path(), &mut result);
         }
+        check_home_java_directories(&mut result);
         let mut result: Vec<_> = result
             .into_iter()
             .map(|mut a| {
@@ -335,14 +359,15 @@ pub fn search_for_java() -> Vec<String> {
     {
         let mut result = Vec::with_capacity(16);
 
-        // 一些常见目录
-        check_bin_java_directory("/usr/java/bin", &mut result);
-        check_bin_java_directory("/usr/lib/jvm/bin", &mut result);
-        check_bin_java_directory("/usr/lib32/jvm/bin", &mut result);
+        // 一些常见目录（每个子目录是一个 JDK 根目录）
+        check_bin_java_directory("/usr/java", &mut result);
+        check_bin_java_directory("/usr/lib/jvm", &mut result);
+        check_bin_java_directory("/usr/lib32/jvm", &mut result);
 
-        // 从环境变量中查询 java.exe
+        // 从环境变量中查询 java；POSIX 的 PATH 用 ':' 分隔，
+        // 必须交给 split_paths 处理，不能按 Windows 的 ';' 切分。
         if let Ok(paths) = std::env::var("PATH") {
-            for path in paths.split(';') {
+            for path in std::env::split_paths(&paths) {
                 check_java(path, &mut result);
             }
         }
@@ -351,6 +376,8 @@ pub fn search_for_java() -> Vec<String> {
             let path = PathBuf::from(path).join("jdk");
             check_bin_java_directory(path.as_path(), &mut result);
         }
+        // sdkman / Gradle / JetBrains 等常见的用户级 JDK 目录
+        check_home_java_directories(&mut result);
         // 主目录里的 .minecraft/runtime 文件夹
         if let Some(mut home_path) = dirs::home_dir() {
             home_path.push(".minecraft/runtime/jre-legacy/linux/jre-legacy/bin");
@@ -372,6 +399,7 @@ pub fn search_for_java() -> Vec<String> {
             &mut result,
         );
         check_java("/Applications/Xcode.app/Contents/Applications/Application Loader.app/Contents/MacOS/itms/java/bin/java", &mut result);
+        check_home_java_directories(&mut result);
 
         result
     }

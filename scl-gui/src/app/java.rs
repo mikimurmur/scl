@@ -13,12 +13,29 @@ use crate::{
     utils::{progress::Progress, thread::thread_main},
 };
 
+/// 两个 Java 路径是否指向同一个可执行文件。
+///
+/// sdkman 的 `current` 是符号链接，与具体版本目录的路径字符串不同，
+/// 但实际是同一个文件；只按字符串比较会重复添加。
+fn same_java_path(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// 官方 `JavaRuntimeInfo::is_same_rt` 的比较规则：
 pub fn same_runtime(a: &JavaRuntimeInfo, b: &JavaRuntimeInfo) -> bool {
     // 配置线只持久化主版本号，完整版本号在回读后会变成主版本数字符串，
     // 这里复用配置层的身份键（path + main_version），避免扫描结果与配置项
     // 因版本号形态不同而重复累积。
     a.is_same_rt(b)
+        // 符号链接（如 sdkman 的 current）与真实版本目录指向同一文件，
+        // 路径字符串不同但仍是同一个运行时。
+        || (a.main_version == b.main_version && same_java_path(&a.path, &b.path))
 }
 
 /// PATH 默认项的路径（官方 JavaItem 用这两个字符串决定 Label 的
@@ -255,6 +272,14 @@ pub fn search_java(ctx: &EventCtx, _data: &AppState) {
         // 避免对同一文件重复执行 `java -version`。
         candidates.sort();
         candidates.dedup();
+        // 符号链接（sdkman 的 current）与真实版本目录是同一个文件，
+        // 按解析后的真实路径再去重一次，避免重复探测与重复结果。
+        let mut canonical_paths = std::collections::HashSet::new();
+        candidates.retain(|path| {
+            let canonical =
+                std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+            canonical_paths.insert(canonical)
+        });
         progress.send(ReportState::SetMessage("正在检索运行时信息".into()));
         let mut result = Vec::new();
         let mut failed = 0usize;
@@ -289,7 +314,7 @@ pub fn search_java(ctx: &EventCtx, _data: &AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{merged_java_list, scan_notice, JavaRuntimeInfo};
+    use super::{merged_java_list, same_runtime, scan_notice, JavaRuntimeInfo};
 
     fn runtime(path: &str, version: &str, main_version: u8, name: &str) -> JavaRuntimeInfo {
         JavaRuntimeInfo {
@@ -350,5 +375,52 @@ mod tests {
             .contains("未能识别任何 Java 运行时"));
         assert!(scan_notice(2, 1).unwrap().contains("已跳过 1 个"));
         assert_eq!(scan_notice(0, 0).unwrap(), "没有找到可用的 Java 运行时");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_java_path_is_same_runtime() {
+        use std::os::unix::fs::symlink;
+
+        let base =
+            std::env::temp_dir().join(format!("scl-java-symlink-test-{}", std::process::id()));
+        let version_dir = base.join("21.0.11-zulu");
+        let bin = version_dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("java"), b"").unwrap();
+        let current = base.join("current");
+        symlink(&version_dir, &current).unwrap();
+
+        let version = runtime(
+            &bin.join("java").to_string_lossy(),
+            "21.0.11",
+            21,
+            "版本目录",
+        );
+        let via_current = runtime(
+            &current.join("bin/java").to_string_lossy(),
+            "21.0.11",
+            21,
+            "current 符号链接",
+        );
+        assert!(
+            same_runtime(&version, &via_current),
+            "current 符号链接与版本目录应视为同一运行时"
+        );
+        // sdkman 的 current 与版本目录同时被搜到时，合并后只能保留一条。
+        let merged = merged_java_list(vec![via_current], vec![version]);
+        assert_eq!(merged.len(), 1);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn same_main_version_different_paths_are_distinct() {
+        let a = runtime("/opt/jdk-a/bin/java", "17.0.1", 17, "A");
+        let b = runtime("/opt/jdk-b/bin/java", "17.0.2", 17, "B");
+        assert!(
+            !same_runtime(&a, &b),
+            "不同路径的 JDK 即使主版本相同也不能合并"
+        );
     }
 }

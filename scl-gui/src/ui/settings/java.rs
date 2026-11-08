@@ -3,7 +3,7 @@
 use druid::{
     commands,
     kurbo::BezPath,
-    piet::{Text, TextLayout, TextLayoutBuilder},
+    piet::{PaintBrush, Text, TextLayout, TextLayoutBuilder},
     widget::{
         Click, ControllerHost, CrossAxisAlignment, Flex, List, Scroll, SizedBox, ViewSwitcher,
     },
@@ -12,7 +12,7 @@ use druid::{
 };
 use scl_gui_widgets::{
     theme::{
-        color::{base, main, typography},
+        color::{base, list, main, typography},
         icons::IconKeyPair,
     },
     widgets::label,
@@ -64,6 +64,9 @@ impl Widget<AppState> for ActionRow {
                 ctx.set_active(false);
                 ctx.request_paint();
             }
+            Event::MouseMove(_) => {
+                ctx.set_cursor(&druid::Cursor::Pointer);
+            }
             _ => {}
         }
     }
@@ -102,6 +105,19 @@ impl Widget<AppState> for ActionRow {
 
     fn paint(&mut self, ctx: &mut PaintCtx, _data: &AppState, env: &Env) {
         let size = ctx.size();
+
+        // 与运行时列表项一致：hover 显示列表底色，按下加深。
+        if ctx.is_hot() {
+            let is_active = ctx.is_active();
+            ctx.fill(
+                size.to_rect(),
+                &PaintBrush::Color(if is_active {
+                    env.get(base::LOW)
+                } else {
+                    env.get(list::LIST_LOW)
+                }),
+            );
+        }
 
         // 原版：+ 图标约 24x24（16x16 视图盒放大 1.5），左内边距 14，文字从 50 开始。
         ctx.with_save(|ctx| {

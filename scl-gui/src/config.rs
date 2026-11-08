@@ -542,6 +542,13 @@ fn save_config_mutex() -> &'static Mutex<()> {
 
 /// 获取配置文件路径
 pub fn config_path() -> PathBuf {
+    // 端到端测试驱动（SCL_MOCK*/SCL_AUTO_* 等）期间，配置也放进已隔离的
+    // HOME，避免测试把 CWD 下的真实 `.scl.json` 覆盖/写脏（测试污染的根因）。
+    if crate::is_test_driver_env() {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(".scl.json");
+        }
+    }
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(".scl.json")

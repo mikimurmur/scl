@@ -7,12 +7,13 @@
 
 use druid::{
     kurbo::BezPath,
+    piet::PaintBrush,
     widget::{Label, LineBreaking},
     BoxConstraints, Env, Event, EventCtx, LayoutCtx, LifeCycle, LifeCycleCtx, MouseButton,
     PaintCtx, Point, RenderContext, Size, Target, UpdateCtx, Widget, WidgetPod,
 };
 use scl_gui_widgets::theme::{
-    color::{self, base, typography},
+    color::{self, base, list, typography},
     icons::IconKeyPair,
 };
 
@@ -110,6 +111,7 @@ impl Widget<JavaRuntimeInfo> for JavaItem {
                     }
                 } else {
                     ctx.set_active(true);
+                    ctx.request_paint();
                 }
             }
             Event::MouseUp(mouse) if mouse.button == MouseButton::Left && ctx.is_active() => {
@@ -121,6 +123,10 @@ impl Widget<JavaRuntimeInfo> for JavaItem {
                     Target::Global,
                 ));
                 ctx.set_handled();
+            }
+            Event::MouseMove(_) => {
+                // 与列表项的点击反馈配套：悬停时显示手型指针。
+                ctx.set_cursor(&druid::Cursor::Pointer);
             }
             _ => {}
         }
@@ -190,6 +196,19 @@ impl Widget<JavaRuntimeInfo> for JavaItem {
     fn paint(&mut self, ctx: &mut PaintCtx, data: &JavaRuntimeInfo, env: &Env) {
         let size = ctx.size();
         let height = size.height;
+        // 与 DownloadModuleItem / LargeListItem 相同的列表交互底色：
+        // hover 用列表低对比色，按下用主题 base::LOW。
+        if ctx.is_hot() {
+            let is_active = ctx.is_active();
+            ctx.fill(
+                size.to_rect(),
+                &PaintBrush::Color(if is_active {
+                    env.get(base::LOW)
+                } else {
+                    env.get(list::LIST_LOW)
+                }),
+            );
+        }
         // 原版没有色块底：8/16 徽标本身就是黑/白色的 filled SVG。
         // 默认项图标约 20x16，左内边距 14；图标在行内垂直居中。
         let icon_top = (height - 16.) / 2.;

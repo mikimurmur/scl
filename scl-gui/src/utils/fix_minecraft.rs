@@ -171,8 +171,10 @@ fn fix_version_dir<R: Reporter>(
     // 不处理客户端 JAR。但「补全/修复版本文件」在 JAR 缺失时应能恢复，
     // 否则该版本必然启动失败（官方此行为属有害缺陷 DEV，不照抄）。这里只在
     // JAR 不存在时补下；已存在时保持官方语义，不重复做整文件 SHA1 校验。
+    // NeoForge 26+ 的游戏 jar 由 FML 从 libraries 目录加载，版本目录 jar 不是
+    // 启动产物；补出原版 jar 反而会被后续流程误用，因此跳过。
     let jar_path = path.join(format!("{name}.jar"));
-    if !jar_path.is_file() {
+    if !meta.main_class.starts_with("net.neoforged.fml.startup.") && !jar_path.is_file() {
         if let Some(main_jar) = meta.downloads.as_ref().and_then(|d| d.get("client")) {
             if let Err(err) = downloader.download_vanilla_jar(
                 &main_jar.url,

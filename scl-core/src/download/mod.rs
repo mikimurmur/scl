@@ -366,13 +366,13 @@ impl<R: Reporter> GameDownload for Downloader<R> {
             forge_result?;
             self.install_forge_post(version_name, &vanilla.id, forge)?;
         } else if !neoforge.is_empty() {
+            // NeoForge 安装器会自行生成目标版本的元数据与补丁产物（26.x 的补丁
+            // jar 位于 libraries/net/neoforged/minecraft-client-patched）；这里只
+            // 准备原版运行前提，不能在版本目录写一份原版 jar，否则启动时会被
+            // classpath 误用。
             self.install_vanilla(&vanilla.id, &vanilla)?; // NeoForge 安装需要原版，如果安装器没有解析到则会从官方源下载，速度很慢
-            let (vanilla_result, neoforge_result) = rayon::join(
-                || self.install_vanilla(version_name, &vanilla),
-                || self.install_neoforge_pre(version_name, &vanilla.id, neoforge),
-            );
-            vanilla_result?;
-            neoforge_result?;
+            self.install_vanilla_prerequisites(version_name, &vanilla)?;
+            self.install_neoforge_pre(version_name, &vanilla.id, neoforge)?;
             self.install_neoforge_post(version_name, &vanilla.id, neoforge)?;
         } else {
             self.install_vanilla(version_name, &vanilla)?;

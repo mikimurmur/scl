@@ -164,6 +164,16 @@ pub trait VanillaDownloadExt: Sync {
 
     /// 安装一个游戏版本
     fn install_vanilla(&self, version_name: &str, version_info: &VersionInfo) -> DynResult;
+
+    /// 只准备原版运行前提（依赖库、资源、原生库），不写版本 JSON 与游戏 JAR
+    ///
+    /// 供安装器型加载器使用：它们会自行生成目标版本元数据，被补丁过的游戏 JAR
+    /// 也位于 libraries 目录，版本目录不应再出现一份原版 JAR。
+    fn install_vanilla_prerequisites(
+        &self,
+        version_name: &str,
+        version_info: &VersionInfo,
+    ) -> DynResult;
 }
 
 impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
@@ -705,6 +715,30 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
     }
 
     fn install_vanilla(&self, version_name: &str, version_info: &VersionInfo) -> DynResult {
+        self.install_vanilla_with_jar(version_name, version_info, true)
+    }
+
+    fn install_vanilla_prerequisites(
+        &self,
+        version_name: &str,
+        version_info: &VersionInfo,
+    ) -> DynResult {
+        self.install_vanilla_with_jar(version_name, version_info, false)
+    }
+}
+
+impl<R: Reporter> Downloader<R> {
+    /// 安装原版的公共流程
+    ///
+    /// `with_jar` 为 false 时只准备依赖库、资源和原生库，不写版本 JSON 与游戏
+    /// JAR。安装器型加载器（如 NeoForge 26+）会自行生成版本元数据，并把被补丁
+    /// 过的游戏 JAR 放到 libraries 下；启动器不应再往版本目录写一份原版 JAR。
+    fn install_vanilla_with_jar(
+        &self,
+        version_name: &str,
+        version_info: &VersionInfo,
+        with_jar: bool,
+    ) -> DynResult {
         self.reporter.set_max_progress(4.);
         self.reporter
             .set_message(format!("正在获取版本元数据 {version_name}"));
@@ -735,7 +769,9 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
         let res = crate::http::retry_get_bytes_timeout(&meta_uri, Some(META_TIMEOUT))
             .map_err(|e| anyhow::anyhow!("下载版本元数据失败：{:?}", e))?;
 
-        fs_err::write(&version_file, &res)?;
+        if with_jar {
+            fs_err::write(&version_file, &res)?;
+        }
 
         self.reporter
             .set_message(format!("正在下载游戏文件 {version_name}"));
@@ -744,7 +780,9 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
 
         version_meta.fix_libraries();
 
-        self.download_vanilla(version_name, &version_meta, false)?;
+        // 修复模式只补依赖库/资源/原生库，不下载客户端 JAR；正好是安装器型
+        // 加载器所需的「原版运行前提」。
+        self.download_vanilla(version_name, &version_meta, !with_jar)?;
 
         Ok(())
     }

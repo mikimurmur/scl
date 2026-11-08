@@ -160,6 +160,15 @@ fn auth_xuid(auth: &AuthMethod) -> String {
     }
 }
 
+/// 该主类是否由 FML 自行从 libraries 目录解析被补丁过的游戏 jar
+///
+/// NeoForge 26+ 的 `net.neoforged.fml.startup.*` 入口会通过 `--fml.*` 参数和
+/// `-DlibraryDirectory` 定位 `minecraft-client-patched` 与 `neoforge-universal`，
+/// 因此启动器不能再把版本目录下的 jar 加入 classpath。
+fn fml_resolves_game_jar(main_class: &str) -> bool {
+    main_class.starts_with("net.neoforged.fml.startup.")
+}
+
 /// 启动前校验实际选中的 Java 运行时是否满足版本元数据要求
 ///
 /// 不满足时直接返回错误，由调用方转成启动失败提示；此时尚未构造任何启动参数，
@@ -306,6 +315,12 @@ impl Client {
             let lib_args: Vec<_> =
                 if meta.main_class == "cpw.mods.bootstraplauncher.BootstrapLauncher" {
                     // 新版 Forge 不再需要引入版本文件夹下的 jar 文件了
+                    lib_args.into_iter().map(|x| x.1).collect()
+                } else if fml_resolves_game_jar(&meta.main_class) {
+                    // NeoForge 26+ 由 FML 启动入口自行从 libraries 目录加载
+                    // minecraft-client-patched 与 universal；版本目录里的原版 jar
+                    // 一旦进入 classpath，FML 会把它当作「Minecraft + NeoForge
+                    // 合并配置」并在系统文件校验阶段拒绝启动。
                     lib_args.into_iter().map(|x| x.1).collect()
                 } else {
                     lib_args
@@ -762,7 +777,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use super::{auth_xuid, Client, ClientConfig};
+    use super::{auth_xuid, fml_resolves_game_jar, Client, ClientConfig};
     use crate::{auth::structs::AuthMethod, java::JavaRuntime, password::Password};
 
     fn microsoft(xuid: &str) -> AuthMethod {
@@ -980,6 +995,68 @@ mod tests {
         let err = build_error(fixture.config(0));
         assert!(err.contains("无法识别所选 Java 运行时的版本"), "{err}");
         assert!(err.contains("需要 Java 25"), "{err}");
+    }
+
+    #[test]
+    fn fml_startup_versions_do_not_put_version_jar_on_classpath() {
+        // NeoForge 26+ 的补丁 jar 在 libraries 下，由 FML 自行加载；版本目录里
+        // 的原版 jar 一旦进入 classpath 会被 FML 判成合并配置并拒绝启动。
+        assert!(fml_resolves_game_jar("net.neoforged.fml.startup.Client"));
+        assert!(fml_resolves_game_jar("net.neoforged.fml.startup.Server"));
+        assert!(!fml_resolves_game_jar("net.minecraft.client.main.Main"));
+
+        let fixture = Fixture::new(
+            "fml-startup",
+            r#"{
+                "mainClass": "net.neoforged.fml.startup.Client",
+                "inheritsFrom": "26.1.2",
+                "arguments": {
+                    "game": ["--fml.neoForgeVersion", "26.1.2.126"],
+                    "jvm": ["-cp", "${classpath}"]
+                },
+                "libraries": []
+            }"#,
+        );
+        let version_jar = fixture
+            .version_dir
+            .join(format!("{}.jar", fixture.version_name));
+        fs_err::write(&version_jar, b"vanilla copy").unwrap();
+
+        let client = Client::new(fixture.config(25)).unwrap();
+        let classpath = client
+            .args
+            .iter()
+            .find(|arg| arg.contains(&fixture.version_name) && arg.ends_with(".jar"));
+        assert!(
+            classpath.is_none(),
+            "FML 启动版本的 classpath 不应包含版本目录 jar：{classpath:?}"
+        );
+    }
+
+    #[test]
+    fn vanilla_versions_keep_version_jar_on_classpath() {
+        // 原版仍依赖版本目录 jar，不能被上一条规则误伤。
+        let fixture = Fixture::new(
+            "vanilla-cp",
+            r#"{
+                "mainClass": "net.minecraft.client.main.Main",
+                "arguments": { "game": [], "jvm": ["-cp", "${classpath}"] },
+                "libraries": []
+            }"#,
+        );
+        let version_jar = fixture
+            .version_dir
+            .join(format!("{}.jar", fixture.version_name));
+        fs_err::write(&version_jar, b"vanilla").unwrap();
+
+        let client = Client::new(fixture.config(8)).unwrap();
+        assert!(
+            client
+                .args
+                .iter()
+                .any(|arg| arg.contains(&version_jar.to_string_lossy().to_string())),
+            "原版启动的 classpath 应包含版本目录 jar"
+        );
     }
 
     #[test]

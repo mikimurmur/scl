@@ -939,15 +939,18 @@ mod tests {
             split_launch_args("-a\n-b\t-c", "ctx").unwrap(),
             vec!["-a".to_owned(), "-b".to_owned(), "-c".to_owned()]
         );
-        // 未闭合引号：官方走 Err 分支，错误信息 = 上下文 + Debug 原始串
-        let err =
-            split_launch_args(r#"-Xmx1G "unclosed"#, "解析切割 JVM 参数参数失败").unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            r#"解析切割 JVM 参数参数失败: "-Xmx1G \"unclosed""#
-        );
-        // 未闭合单引号同理（仅 Unix shlex 会把单引号当引号）
+        // 未闭合引号：Unix 的 shlex 走 Err 分支，错误信息 = 上下文 + Debug 原始串；
+        // Windows 的 winsplit 不会因未闭合双引号报错，故仅在 Unix 断言。
         #[cfg(unix)]
-        assert!(split_launch_args("-Dq='unclosed", "ctx").is_err());
+        {
+            let err =
+                split_launch_args(r#"-Xmx1G "unclosed"#, "解析切割 JVM 参数参数失败").unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                r#"解析切割 JVM 参数参数失败: "-Xmx1G \"unclosed""#
+            );
+            // 未闭合单引号同理
+            assert!(split_launch_args("-Dq='unclosed", "ctx").is_err());
+        }
     }
 }

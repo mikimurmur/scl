@@ -1,8 +1,12 @@
 //! 将 [`scl_core::progress`] 的进度报告转换为 Druid 命令发送到界面上。
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Mutex, OnceLock,
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex, OnceLock,
+    },
+    time::Duration,
 };
 
 use druid::{ExtEventSink, Target};
@@ -11,6 +15,13 @@ use scl_gui_widgets::widgets::{
     ADD_MAX_PROGRESS, ADD_PROGRESS, HIDE_PROGRESS, NEW_PROGRESS, REMOVE_PROGRESS, SET_MAX_PROGRESS,
     SET_MESSAGE, SET_PROGRESS, SET_SUB_MESSAGE,
 };
+
+/// 进度事件合并窗口
+///
+/// 下载器按文件完成上报，64 并发时会在极短时间内产生成批事件；直接逐条
+/// 提交到 Druid 会让界面在事件风暴里反复重排。这里把同一进度 id 的状态
+/// 合并到每 60ms 最多刷新一次，既保持视觉连续，也避免无意义重绘。
+const PROGRESS_FLUSH_INTERVAL: Duration = Duration::from_millis(60);
 
 /// 进度编号生成器
 static NEXT_PROGRESS_ID: AtomicUsize = AtomicUsize::new(1);
@@ -164,8 +175,146 @@ fn sync_taskbar(window: &druid::WindowHandle) {
     }
 }
 
+/// 合并中的单条进度状态
+struct PendingProgress {
+    sink: ExtEventSink,
+    current: f64,
+    max: f64,
+    message: Option<String>,
+    sub_message: Option<String>,
+    current_dirty: bool,
+    max_dirty: bool,
+    message_dirty: bool,
+    sub_message_dirty: bool,
+    indeterminate: bool,
+    indeterminate_dirty: bool,
+}
+
+impl PendingProgress {
+    fn new(sink: ExtEventSink) -> Self {
+        Self {
+            sink,
+            current: 0.,
+            max: 0.,
+            message: None,
+            sub_message: None,
+            current_dirty: false,
+            max_dirty: false,
+            message_dirty: false,
+            sub_message_dirty: false,
+            indeterminate: false,
+            indeterminate_dirty: false,
+        }
+    }
+}
+
+fn pending_map() -> &'static Mutex<HashMap<usize, PendingProgress>> {
+    static PENDING: OnceLock<Mutex<HashMap<usize, PendingProgress>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 启动后台合并线程（全进程一个即可）
+fn ensure_flusher() {
+    static FLUSHER: OnceLock<()> = OnceLock::new();
+    FLUSHER.get_or_init(|| {
+        let _ = std::thread::Builder::new()
+            .name("scl-progress-flush".into())
+            .spawn(|| loop {
+                std::thread::sleep(PROGRESS_FLUSH_INTERVAL);
+                flush_pending();
+            });
+    });
+}
+
+/// 把当前合并窗口内的状态一次性提交给界面
+fn flush_pending() {
+    let batch: Vec<_> = {
+        let Ok(mut map) = pending_map().lock() else {
+            return;
+        };
+        map.iter_mut()
+            .filter_map(|(id, progress)| {
+                let dirty = progress.current_dirty
+                    || progress.max_dirty
+                    || progress.message_dirty
+                    || progress.sub_message_dirty
+                    || progress.indeterminate_dirty;
+                if !dirty {
+                    return None;
+                }
+                let hide = progress.indeterminate && progress.indeterminate_dirty;
+                let max = progress.max_dirty.then_some(progress.max);
+                let current = progress.current_dirty.then_some(progress.current);
+                let message = if progress.message_dirty {
+                    progress.message.take()
+                } else {
+                    None
+                };
+                let sub_message = if progress.sub_message_dirty {
+                    progress.sub_message.take()
+                } else {
+                    None
+                };
+                progress.current_dirty = false;
+                progress.max_dirty = false;
+                progress.message_dirty = false;
+                progress.sub_message_dirty = false;
+                progress.indeterminate_dirty = false;
+                Some((
+                    *id,
+                    progress.sink.clone(),
+                    hide,
+                    max,
+                    current,
+                    message,
+                    sub_message,
+                ))
+            })
+            .collect()
+    };
+
+    for (id, sink, hide, max, current, message, sub_message) in batch {
+        if hide {
+            let _ = sink.submit_command(HIDE_PROGRESS, id, Target::Global);
+            continue;
+        }
+        // 先更新分母再更新完成量，避免界面短暂拿到旧分母。
+        if let Some(max) = max {
+            let _ = sink.submit_command(SET_MAX_PROGRESS, (id, max), Target::Global);
+        }
+        if let Some(current) = current {
+            let _ = sink.submit_command(SET_PROGRESS, (id, current), Target::Global);
+        }
+        if let Some(message) = message {
+            let _ = sink.submit_command(SET_MESSAGE, (id, message), Target::Global);
+        }
+        if let Some(sub_message) = sub_message {
+            let _ = sink.submit_command(SET_SUB_MESSAGE, (id, sub_message), Target::Global);
+        }
+    }
+}
+
+fn with_pending(sink: &ExtEventSink, id: usize, f: impl FnOnce(&mut PendingProgress)) {
+    ensure_flusher();
+    let Ok(mut map) = pending_map().lock() else {
+        return;
+    };
+    let progress = map
+        .entry(id)
+        .or_insert_with(|| PendingProgress::new(sink.clone()));
+    f(progress);
+}
+
+fn remove_pending(id: usize) {
+    if let Ok(mut map) = pending_map().lock() {
+        map.remove(&id);
+    }
+}
+
 /// 一个将进度上报到 Druid 界面的报告器
-#[derive(Clone)]
+///
+/// `clone` 共享同一个进度编号，只用于把同一个任务内的多个线程/闭包写入
+/// 同一条进度；只有创建者（owner）在 drop 时才负责移除进度条。
 pub struct Progress {
     id: usize,
     sink: ExtEventSink,
@@ -173,59 +322,72 @@ pub struct Progress {
     parents: Vec<usize>,
     /// 是否已经被移除
     removed: bool,
+    /// 是否为这条进度的创建者（仅创建者 drop 时移除）
+    owner: bool,
+}
+
+impl Clone for Progress {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            sink: self.sink.clone(),
+            parents: self.parents.clone(),
+            removed: self.removed,
+            owner: false,
+        }
+    }
 }
 
 impl Progress {
     /// 创建一个新的进度
     pub fn new(sink: ExtEventSink) -> Self {
         let id = NEXT_PROGRESS_ID.fetch_add(1, Ordering::Relaxed);
+        Self::register(sink, id, Vec::new())
+    }
+
+    fn register(sink: ExtEventSink, id: usize, parents: Vec<usize>) -> Self {
         let _ = sink.submit_command(NEW_PROGRESS, id, Target::Global);
+        with_pending(&sink, id, |_| {});
         Self {
             id,
             sink,
-            parents: Vec::new(),
+            parents,
             removed: false,
+            owner: true,
         }
     }
 
-    /// 向本进度与所有祖先进度发送同一条命令
-    ///
-    /// 祖先链复刻官方 `sub()`：子任务上报的 Set/Add 进度会同步写入父进度，
-    /// 父进度条不再静止不动。
-    fn send_to_all<T: Send + Clone + 'static>(
-        &self,
-        selector: druid::Selector<T>,
-        payload: impl Fn(usize) -> T,
-    ) {
+    /// 更新本进度与所有祖先的合并状态
+    fn update_all(&self, f: impl Fn(&mut PendingProgress)) {
         if self.removed {
             return;
         }
         for id in &self.parents {
-            let _ = self
-                .sink
-                .submit_command(selector, payload(*id), Target::Global);
+            with_pending(&self.sink, *id, &f);
         }
-        let _ = self
-            .sink
-            .submit_command(selector, payload(self.id), Target::Global);
+        with_pending(&self.sink, self.id, &f);
     }
 
-    /// 只向本进度发送命令
-    fn send_self<T: Send + 'static>(&self, selector: druid::Selector<T>, payload: T) {
+    /// 只更新本进度的合并状态
+    fn update_self(&self, f: impl FnOnce(&mut PendingProgress)) {
         if self.removed {
             return;
         }
-        let _ = self.sink.submit_command(selector, payload, Target::Global);
+        with_pending(&self.sink, self.id, f);
+    }
+
+    /// 只移除自身，父进度由创建它的任务负责移除
+    fn remove_self(&self) {
+        remove_pending(self.id);
+        let _ = self
+            .sink
+            .submit_command(REMOVE_PROGRESS, self.id, Target::Global);
     }
 
     /// 移除这个进度
     pub fn remove(mut self) {
         self.removed = true;
-        // 只移除自身：父进度由创建它的任务负责移除，子进度提前结束不能
-        // 连带弹掉仍在运行的父任务进度条。
-        let _ = self
-            .sink
-            .submit_command(REMOVE_PROGRESS, self.id, Target::Global);
+        self.remove_self();
     }
 }
 
@@ -238,44 +400,67 @@ impl Reporter for Progress {
 
     fn sub(&self) -> Self {
         let id = NEXT_PROGRESS_ID.fetch_add(1, Ordering::Relaxed);
-        let _ = self.sink.submit_command(NEW_PROGRESS, id, Target::Global);
         let mut parents = self.parents.clone();
         parents.push(self.id);
-        Self {
-            id,
-            sink: self.sink.clone(),
-            parents,
-            removed: false,
-        }
+        Self::register(self.sink.clone(), id, parents)
     }
 
     fn send(&self, state: ReportState) {
-        // 进度/最大进度/文案同步聚合到祖先；隐藏与移除只作用于自身，
-        // 否则一个子任务结束会把仍在运行的父进度条一起弹掉。
+        // Add/Max 增量与文案聚合到祖先；Set 绝对值和隐藏/移除只作用于自身，
+        // 避免子进度重置分母或把仍在运行的父进度条弹掉。
         match state {
             ReportState::SetMessage(msg) => {
-                self.send_to_all(SET_MESSAGE, |id| (id, msg.clone()));
+                self.update_all(|p| {
+                    p.message = Some(msg.clone());
+                    p.message_dirty = true;
+                });
             }
             ReportState::SetSubMessage(msg) => {
-                self.send_to_all(SET_SUB_MESSAGE, |id| (id, msg.clone()));
-            }
-            ReportState::SetMaxProgress(value) => {
-                self.send_to_all(SET_MAX_PROGRESS, |id| (id, value));
+                self.update_all(|p| {
+                    p.sub_message = Some(msg.clone());
+                    p.sub_message_dirty = true;
+                });
             }
             ReportState::AddMaxProgress(value) => {
-                self.send_to_all(ADD_MAX_PROGRESS, |id| (id, value));
-            }
-            ReportState::SetProgress(value) => {
-                self.send_to_all(SET_PROGRESS, |id| (id, value));
+                self.update_all(|p| {
+                    p.max += value;
+                    p.max_dirty = true;
+                    p.indeterminate = false;
+                    p.indeterminate_dirty = false;
+                });
             }
             ReportState::AddProgress(value) => {
-                self.send_to_all(ADD_PROGRESS, |id| (id, value));
+                self.update_all(|p| {
+                    p.current += value;
+                    p.current_dirty = true;
+                    p.indeterminate = false;
+                    p.indeterminate_dirty = false;
+                });
+            }
+            ReportState::SetMaxProgress(value) => {
+                self.update_self(|p| {
+                    p.max = value;
+                    p.max_dirty = true;
+                    p.indeterminate = false;
+                    p.indeterminate_dirty = false;
+                });
+            }
+            ReportState::SetProgress(value) => {
+                self.update_self(|p| {
+                    p.current = value;
+                    p.current_dirty = true;
+                    p.indeterminate = false;
+                    p.indeterminate_dirty = false;
+                });
             }
             ReportState::SetIndeterminateProgress | ReportState::HideProgress => {
-                self.send_self(HIDE_PROGRESS, self.id);
+                self.update_self(|p| {
+                    p.indeterminate = true;
+                    p.indeterminate_dirty = true;
+                });
             }
             ReportState::RemoveProgress => {
-                self.send_self(REMOVE_PROGRESS, self.id);
+                self.remove_self();
             }
         }
     }
@@ -283,10 +468,8 @@ impl Reporter for Progress {
 
 impl Drop for Progress {
     fn drop(&mut self) {
-        if !self.removed {
-            let _ = self
-                .sink
-                .submit_command(REMOVE_PROGRESS, self.id, Target::Global);
+        if !self.removed && self.owner {
+            self.remove_self();
         }
     }
 }

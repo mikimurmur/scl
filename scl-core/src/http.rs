@@ -6,7 +6,7 @@
 //! 应把这些函数放进 `rayon` 线程池执行。
 
 use std::{
-    io::Read,
+    io::{Read, Write},
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
@@ -191,10 +191,34 @@ pub fn download_with_timeout(
 pub fn download_verified_with_timeout(
     uris: &[impl AsRef<str> + std::fmt::Debug],
     dest_path: &str,
+    size: usize,
+    expected_sha1: Option<&str>,
+    expected_size: Option<u64>,
+    timeout: Option<Duration>,
+) -> DynResult {
+    download_verified_with_timeout_progress(
+        uris,
+        dest_path,
+        size,
+        expected_sha1,
+        expected_size,
+        timeout,
+        &mut |_| {},
+    )
+}
+
+/// 与 [`download_verified_with_timeout`] 相同，并在下载过程中上报增量字节数
+///
+/// 回调收到的是**增量**：读取到数据时为正，当前尝试失败/校验失败时会把该次
+/// 已上报的字节数一次性减回去，保证最终净增量等于实际写入的文件大小。
+pub fn download_verified_with_timeout_progress(
+    uris: &[impl AsRef<str> + std::fmt::Debug],
+    dest_path: &str,
     _size: usize,
     expected_sha1: Option<&str>,
     expected_size: Option<u64>,
     timeout: Option<Duration>,
+    on_progress: &mut dyn FnMut(i64),
 ) -> DynResult {
     for uri in uris {
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
@@ -214,16 +238,31 @@ pub fn download_verified_with_timeout(
                 Ok(response) => {
                     if response.is_success() {
                         let tmp_dest_path = format!("{dest_path}.tmp");
-                        let result = (|| -> DynResult {
-                            let mut file = fs_err::File::create(&tmp_dest_path)?;
-                            std::io::copy(&mut response.into_reader(), &mut file)?;
-                            drop(file);
-                            verify_downloaded_file(&tmp_dest_path, expected_sha1, expected_size)?;
-                            fs_err::rename(&tmp_dest_path, dest_path)?;
-                            Ok(())
-                        })();
+                        let mut reported = 0i64;
+                        let result = {
+                            let mut report = |delta: i64| {
+                                reported += delta;
+                                on_progress(delta);
+                            };
+                            (|| -> DynResult {
+                                let mut file = fs_err::File::create(&tmp_dest_path)?;
+                                copy_with_progress(response.into_reader(), &mut file, &mut report)?;
+                                drop(file);
+                                verify_downloaded_file(
+                                    &tmp_dest_path,
+                                    expected_sha1,
+                                    expected_size,
+                                )?;
+                                fs_err::rename(&tmp_dest_path, dest_path)?;
+                                Ok(())
+                            })()
+                        };
                         if result.is_ok() {
                             return Ok(());
+                        }
+                        // 本次尝试已上报的字节从未落盘，减回去让净进度保持正确。
+                        if reported > 0 {
+                            on_progress(-reported);
                         }
                         let _ = fs_err::remove_file(&tmp_dest_path);
                         if retries >= 5 {
@@ -248,6 +287,39 @@ pub fn download_verified_with_timeout(
         dest_path,
         uris
     )
+}
+
+/// 边读取边写入文件，并按 ~50ms / 256KB 的窗口上报增量字节
+fn copy_with_progress(
+    mut reader: impl Read,
+    file: &mut fs_err::File,
+    on_progress: &mut dyn FnMut(i64),
+) -> std::io::Result<u64> {
+    const READ_CHUNK: usize = 64 * 1024;
+    const REPORT_BYTES: u64 = 256 * 1024;
+    const REPORT_INTERVAL: Duration = Duration::from_millis(50);
+
+    let mut buffer = vec![0u8; READ_CHUNK];
+    let mut total = 0u64;
+    let mut reported = 0u64;
+    let mut last_report = Instant::now();
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read])?;
+        total += read as u64;
+        if total - reported >= REPORT_BYTES || last_report.elapsed() >= REPORT_INTERVAL {
+            on_progress((total - reported) as i64);
+            reported = total;
+            last_report = Instant::now();
+        }
+    }
+    if total > reported {
+        on_progress((total - reported) as i64);
+    }
+    Ok(total)
 }
 
 /// 校验刚下载到临时路径的文件大小与 SHA1
@@ -579,6 +651,7 @@ mod timeout_tests {
     };
 
     use super::{download_verified_with_timeout, download_with_timeout};
+    use crate::http::download_verified_with_timeout_progress;
 
     /// 本地 HTTP 测试串行执行，避免多个测试同时占用全局 ureq 客户端。
     static NETWORK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -701,6 +774,86 @@ mod timeout_tests {
         .expect("匹配的大小与 SHA1 应下载成功");
         assert_eq!(fs_err::read(&dest).expect("读取下载文件"), b"good".to_vec());
         let _ = fs_err::remove_file(&dest);
+        handle.join().ok();
+    }
+
+    /// 流式进度回调的增量总和必须等于文件字节数，且大文件应在下载过程中
+    /// 分多次上报，而不是等到整个文件写完才一次性跳到 100%。
+    #[test]
+    fn progress_reports_streaming_bytes_for_large_file() {
+        let _guard = lock_network_test();
+        const SIZE: usize = 1024 * 1024;
+        let body: &'static [u8] = Box::leak(vec![0x5au8; SIZE].into_boxed_slice());
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
+        let addr = listener.local_addr().expect("获取本地地址");
+        let handle = serve_body(listener, body, 1);
+        let dest = std::env::temp_dir()
+            .join(format!("scl-http-progress-{}.bin", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let _ = fs_err::remove_file(&dest);
+        let sha1 = sha1_smol::Sha1::from(body).hexdigest();
+        let uri = format!("http://{addr}/progress");
+
+        let mut deltas = Vec::new();
+        download_verified_with_timeout_progress(
+            std::slice::from_ref(&uri),
+            &dest,
+            0,
+            Some(&sha1),
+            Some(SIZE as u64),
+            Some(Duration::from_secs(10)),
+            &mut |delta| deltas.push(delta),
+        )
+        .expect("大文件应下载成功");
+
+        let positive = deltas.iter().filter(|delta| **delta > 0).count();
+        assert_eq!(
+            deltas.iter().sum::<i64>(),
+            SIZE as i64,
+            "进度净增量必须等于文件字节数，实际增量：{deltas:?}"
+        );
+        assert!(
+            positive >= 2,
+            "1MB 文件应至少分两次上报进度，实际只上报 {positive} 次：{deltas:?}"
+        );
+        let _ = fs_err::remove_file(&dest);
+        handle.join().ok();
+    }
+
+    /// 校验失败时应把本次尝试已上报的字节减回去，避免进度条虚增后卡住。
+    #[test]
+    fn progress_rolls_back_when_checksum_fails() {
+        let _guard = lock_network_test();
+        let body: &'static [u8] = b"bad";
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地端口");
+        let addr = listener.local_addr().expect("获取本地地址");
+        // 校验失败会在同一链接上重试 5 次。
+        let handle = serve_body(listener, body, 5);
+        let dest = std::env::temp_dir()
+            .join(format!("scl-http-rollback-{}.bin", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let _ = fs_err::remove_file(&dest);
+
+        let mut deltas = Vec::new();
+        let result = download_verified_with_timeout_progress(
+            std::slice::from_ref(&format!("http://{addr}/bad")),
+            &dest,
+            0,
+            Some("0000000000000000000000000000000000000000"),
+            Some(3),
+            Some(Duration::from_secs(10)),
+            &mut |delta| deltas.push(delta),
+        );
+        assert!(result.is_err(), "SHA1 不匹配应返回错误");
+        assert_eq!(
+            deltas.iter().sum::<i64>(),
+            0,
+            "失败尝试的已上报字节必须全部回冲，实际增量：{deltas:?}"
+        );
+        assert!(!std::path::Path::new(&dest).exists(), "坏内容不得落盘");
+        let _ = fs_err::remove_file(format!("{dest}.tmp"));
         handle.join().ok();
     }
 }

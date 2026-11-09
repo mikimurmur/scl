@@ -27,24 +27,27 @@ const META_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 依次尝试各下载源，每个源限时等待，超时/失败后继续下一个源
 ///
-/// 直接复用 [`crate::http::download_verified_with_timeout`] 的单源重试、
-/// 临时文件与 SHA1/大小校验语义，避免坏内容被 rename 到目标路径。
-fn download_with_sources(
+/// 直接复用 [`crate::http::download_verified_with_timeout_progress`] 的单源重试、
+/// 临时文件与 SHA1/大小校验语义，避免坏内容被 rename 到目标路径；流式字节
+/// 增量交给调用方累计进度。
+fn download_with_sources_progress(
     uris: &[String],
     dest: &str,
     sha1: Option<&str>,
     size: Option<u64>,
     per_source: Duration,
+    on_progress: &mut dyn FnMut(i64),
 ) -> DynResult {
     let mut last_err = None;
     for uri in uris {
-        match crate::http::download_verified_with_timeout(
+        match crate::http::download_verified_with_timeout_progress(
             std::slice::from_ref(uri),
             dest,
             0,
             sha1,
             size,
             Some(per_source),
+            on_progress,
         ) {
             Ok(()) => return Ok(()),
             Err(err) => {
@@ -100,6 +103,92 @@ fn asset_virtual_path(objects_dir: &str, virtual_id: &str, name: &str) -> String
         "{}/virtual/{virtual_id}/{name}",
         assets_root.to_string_lossy()
     )
+}
+
+/// 一个待下载的依赖库任务
+enum LibraryTask<'a> {
+    Common {
+        sha1: Cow<'a, str>,
+        path: Cow<'a, str>,
+        size: u64,
+    },
+    Native {
+        platform: Cow<'a, str>,
+        sha1: Cow<'a, str>,
+        path: Cow<'a, str>,
+        size: u64,
+    },
+}
+
+/// 从版本元数据构建依赖库下载任务
+///
+/// 独立成函数是为了在启动并行下载前先登记总字节数，避免一边下载一边增大分母。
+fn build_library_tasks(libraries: &[Library]) -> Vec<LibraryTask<'_>> {
+    // Minecraft 在早期和现在对记录原生库的方式不一样：
+    // 早期记录 `natives` + `downloads.classifiers`；现代直接记录
+    // `org.lwjgl:lwjgl:3.2.2:natives-windows` 这样的 name。
+    // SCL 下载所有平台的原生库，再按平台分别解压。
+    let mut tasks = Vec::with_capacity(libraries.len() * 2);
+    for lib in libraries.iter() {
+        if let Some(downloads) = &lib.downloads {
+            if let Some(classifier) = &downloads.classifiers {
+                for (platform, meta) in classifier.iter() {
+                    let target_platform = match platform.as_str() {
+                        "natives-osx" => "natives-macos",
+                        other => other,
+                    };
+                    tasks.push(LibraryTask::Native {
+                        platform: target_platform.into(),
+                        sha1: meta.sha1.as_str().into(),
+                        path: meta.path.as_str().into(),
+                        size: meta.size as u64,
+                    });
+                }
+            }
+            if let Some(artifact) = &downloads.artifact {
+                if let Some(i) = lib.name.find(":natives-") {
+                    let (_, platform) = lib.name.split_at(i + 1);
+                    tasks.push(LibraryTask::Native {
+                        platform: platform.into(),
+                        sha1: artifact.sha1.as_str().into(),
+                        path: artifact.path.as_str().into(),
+                        size: artifact.size as u64,
+                    });
+                } else if lib.rules.is_allowed() {
+                    tasks.push(LibraryTask::Common {
+                        sha1: artifact.sha1.as_str().into(),
+                        path: artifact.path.as_str().into(),
+                        size: artifact.size as u64,
+                    });
+                }
+            }
+        }
+    }
+    tasks
+}
+
+fn library_tasks_total_size(tasks: &[LibraryTask<'_>]) -> u64 {
+    tasks
+        .iter()
+        .map(|task| match task {
+            LibraryTask::Common { size, .. } | LibraryTask::Native { size, .. } => (*size).max(1),
+        })
+        .sum()
+}
+
+/// 原生库解压阶段的进度单位数（每个平台一组）
+///
+/// 在下载开始前就可从任务列表推导出来，用于提前登记分母，避免资源与依赖库
+/// 都下载完成后再增大分母造成完成度回退。
+fn library_tasks_native_platforms(tasks: &[LibraryTask<'_>]) -> usize {
+    tasks
+        .iter()
+        .filter_map(|task| match task {
+            LibraryTask::Native { platform, .. } => Some(platform.as_ref()),
+            LibraryTask::Common { .. } => None,
+        })
+        .collect::<HashSet<_>>()
+        .len()
 }
 use crate::{
     download::VersionInfo,
@@ -199,43 +288,8 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
         size: u64,
     ) -> DynResult {
         let r = self.reporter.sub();
-        r.add_max_progress(1.);
-        let name = &save_path[save_path.rfind(std::path::is_separator).unwrap_or(0) + 1..];
-        r.set_message(format!("正在下载原版 {name}"));
-        if local_file_matches(Path::new(save_path), sha1, size, self.verify_data)? {
-            r.add_progress(1.);
-            return Ok(());
-        }
-        fs_err::create_dir_all(
-            &save_path[..save_path
-                .rfind(std::path::is_separator)
-                .unwrap_or(save_path.len())],
-        )?;
-        let path = path.parse::<url::Url>()?;
-        let uris = [
-            match self.source {
-                DownloadSource::Default => {
-                    format!("https://launcher.mojang.com{}", path.path())
-                }
-                DownloadSource::BMCLAPI => {
-                    format!("https://bmclapi2.bangbang93.com{}", path.path())
-                }
-                _ => format!("https://launcher.mojang.com{}", path.path()),
-            },
-            format!("https://bmclapi2.bangbang93.com{}", path.path()),
-            format!("https://launcher.mojang.com{}", path.path()),
-        ];
-        download_with_sources(
-            &uris,
-            save_path,
-            Some(sha1),
-            (size > 0).then_some(size),
-            JAR_SOURCE_TIMEOUT,
-        )
-        .map_err(|e| anyhow::anyhow!("下载原版游戏 Jar 失败：{:?}", e))?;
-        self.mark_file_repaired();
-        r.add_progress(1.);
-        Ok(())
+        r.add_max_progress(size.max(1) as f64);
+        self.download_vanilla_jar_reported(&r, path, save_path, sha1, size)
     }
 
     fn download_library(
@@ -246,42 +300,8 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
         save_path: &str,
     ) -> DynResult {
         let r = self.reporter.sub();
-        let full_path = format!("{save_path}/{path}");
-        r.set_message(format!("正在下载原版库 {path}"));
-        r.add_max_progress(1.);
-        if local_file_matches(Path::new(&full_path), &sha1, size, self.verify_data)? {
-            r.add_progress(1.);
-            return Ok(());
-        }
-        fs_err::create_dir_all(
-            &full_path[..full_path
-                .rfind(std::path::is_separator)
-                .unwrap_or(full_path.len())],
-        )?;
-        let default_uris = [
-            match self.source {
-                DownloadSource::Default => {
-                    format!("https://libraries.minecraft.net/{path}")
-                }
-                DownloadSource::BMCLAPI => {
-                    format!("https://bmclapi2.bangbang93.com/maven/{path}")
-                }
-                _ => format!("https://libraries.minecraft.net/{path}"),
-            },
-            format!("https://bmclapi2.bangbang93.com/maven/{path}"),
-            format!("https://libraries.minecraft.net/{path}"),
-        ];
-        download_with_sources(
-            &default_uris,
-            &full_path,
-            (!sha1.is_empty()).then_some(sha1.as_str()),
-            (size > 0).then_some(size),
-            ASSET_SOURCE_TIMEOUT,
-        )
-        .map_err(|e| anyhow::anyhow!("下载库 {} 失败：{:?}", path, e))?;
-        self.mark_file_repaired();
-        r.add_progress(1.);
-        Ok(())
+        r.add_max_progress(size.max(1) as f64);
+        self.download_library_reported(&r, sha1, path, size, save_path)
     }
 
     fn download_asset_index(
@@ -357,7 +377,7 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
         let object_path = asset_object_path(save_path, sha1);
         r.set_message(format!("正在下载原版资源 {name}"));
         if local_file_matches(Path::new(&object_path), sha1, size, self.verify_data)? {
-            r.add_progress(1.);
+            r.add_progress(size.max(1) as f64);
             return Ok(());
         }
         fs_err::create_dir_all(
@@ -379,12 +399,14 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             format!("https://bmclapi2.bangbang93.com/assets/{sub_hash}/{sha1}"),
             format!("https://resources.download.minecraft.net/{sub_hash}/{sha1}"),
         ];
-        download_with_sources(
+        let mut report = |delta: i64| r.add_progress(delta as f64);
+        download_with_sources_progress(
             &uris,
             &object_path,
             Some(sha1),
             (size > 0).then_some(size),
             ASSET_SOURCE_TIMEOUT,
+            &mut report,
         )
         .map_err(|e| {
             anyhow::anyhow!(
@@ -394,7 +416,9 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             )
         })?;
         self.mark_file_repaired();
-        r.add_progress(1.);
+        if size == 0 {
+            r.add_progress(1.);
+        }
         Ok(())
     }
 
@@ -439,119 +463,14 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
     }
 
     fn download_libraries(&self, libraries: &[Library]) -> DynResult<HashMap<String, Vec<String>>> {
-        // Libraries
-        let mut native_jars_mapping: HashMap<String, Vec<String>> =
-            HashMap::with_capacity(libraries.len());
-
         let lr = self.reporter.sub();
         lr.set_message("正在检索并安装需要安装的依赖库".into());
-
-        // Minecraft 在早期和现在对记录原生库的方式不一样
-        // 早期会记录一个 `natives` 字段，键代表平台 `windows`/`osx`/`linux`
-        // 值代表在 `classifiers` 字段中对应的键，如 `natives-windows`
-        // 然后即可查询到对应的原生库和下载链接
-        // 现在直接记录在 `name` 字段中，如 `org.lwjgl:lwjgl:3.2.2:natives-windows`
-        // 故只需检测是否可以通过 `:natives-` 分割字符串即可判定是否为原生库
-
-        // SCL 对此的原生库的下载方式为，下载所有平台和架构的原生库，并按照后缀名分别解压到对应的文件夹中
-
-        enum LibraryTask<'a> {
-            Common {
-                sha1: Cow<'a, str>,
-                path: Cow<'a, str>,
-                size: u64,
-            },
-            Native {
-                platform: Cow<'a, str>,
-                sha1: Cow<'a, str>,
-                path: Cow<'a, str>,
-                size: u64,
-            },
-        }
-
-        let mut tasks = Vec::with_capacity(libraries.len() * 2);
-
-        for lib in libraries.iter() {
-            // 遍历老版本的原生库元数据
-            if let Some(downloads) = &lib.downloads {
-                if let Some(classifier) = &downloads.classifiers {
-                    for (platform, meta) in classifier.iter() {
-                        let target_platform = match platform.as_str() {
-                            "natives-osx" => "natives-macos",
-                            other => other,
-                        };
-                        tasks.push(LibraryTask::Native {
-                            platform: target_platform.into(),
-                            sha1: meta.sha1.as_str().into(),
-                            path: meta.path.as_str().into(),
-                            size: meta.size as u64,
-                        });
-                    }
-                }
-                if let Some(artifact) = &downloads.artifact {
-                    if let Some(i) = lib.name.find(":natives-") {
-                        let (_, platform) = lib.name.split_at(i + 1);
-                        tasks.push(LibraryTask::Native {
-                            platform: platform.into(),
-                            sha1: artifact.sha1.as_str().into(),
-                            path: artifact.path.as_str().into(),
-                            size: artifact.size as u64,
-                        });
-                    } else if lib.rules.is_allowed() {
-                        tasks.push(LibraryTask::Common {
-                            sha1: artifact.sha1.as_str().into(),
-                            path: artifact.path.as_str().into(),
-                            size: artifact.size as u64,
-                        });
-                    }
-                }
-            }
-        }
-
-        for task in &tasks {
-            if let LibraryTask::Native {
-                platform,
-                sha1,
-                path,
-                size: _,
-            } = task
-            {
-                debug!("原生库 {platform} {sha1} {path}");
-                let p = format!("{}/{}", self.minecraft_library_path.as_str(), path);
-                if let Some(native_jars) = native_jars_mapping.get_mut(&platform.to_string()) {
-                    if !native_jars.contains(&p) {
-                        native_jars.push(p);
-                    }
-                } else {
-                    let mut native_jars = Vec::with_capacity(tasks.len());
-                    native_jars.push(p);
-                    native_jars_mapping.insert(platform.to_string(), native_jars);
-                }
-            }
-        }
-
-        run_parallel_tasks(self.parallel_amount, &tasks, |task| -> DynResult {
-            match task {
-                LibraryTask::Common { sha1, path, size } => self.download_library(
-                    sha1.to_string(),
-                    path.to_string(),
-                    *size,
-                    self.minecraft_library_path.as_str(),
-                ),
-                LibraryTask::Native {
-                    sha1, path, size, ..
-                } => self.download_library(
-                    sha1.to_string(),
-                    path.to_string(),
-                    *size,
-                    self.minecraft_library_path.as_str(),
-                ),
-            }
-        })?;
-
+        let tasks = build_library_tasks(libraries);
+        // 总量在任务开始前一次性登记，避免下载过程中分母增长导致完成度回退。
+        lr.add_max_progress(library_tasks_total_size(&tasks) as f64);
+        let result = self.run_library_tasks(&lr, &tasks);
         lr.remove_progress();
-
-        Ok(native_jars_mapping)
+        result
     }
 
     fn download_vanilla(
@@ -634,27 +553,48 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
                 .unwrap_or(false)
             })
             .collect();
-        let amounts = assets_download_tasks.len();
+        let assets_total_size: u64 = assets_download_tasks
+            .iter()
+            .map(|(_, obj)| (obj.size as u64).max(1))
+            .sum();
 
         ar.set_message("下载资源文件".into());
-        ar.add_max_progress(amounts as _);
+        ar.add_max_progress(assets_total_size as _);
+        if !is_repair {
+            // JAR 也按字节计入同一个进度，避免 40MB 的下载在进度条上只占 1 个单位。
+            r.add_max_progress(main_jar.size.max(1) as f64);
+        }
+
+        // 依赖库的总量同样在开始前登记，且与资源/JAR 真正并行下载；
+        // 否则库阶段会在资源阶段结束后才把分母加上，造成完成度大幅回退。
+        let library_tasks = build_library_tasks(&version_meta.libraries);
+        let lr = self.reporter.sub();
+        lr.set_message("正在检索并安装需要安装的依赖库".into());
+        lr.add_max_progress(library_tasks_total_size(&library_tasks) as f64);
+        // 原生库按平台逐个解压，每个平台 1 个进度单位；数量可由任务列表
+        // 提前推导，和资源/JAR/依赖库一起登记到根分母。
+        r.add_max_progress(library_tasks_native_platforms(&library_tasks) as f64);
 
         let native_jars = download_pool().install(|| -> DynResult<_> {
-            let assets_result = run_parallel_tasks(
-                self.parallel_amount,
-                &assets_download_tasks,
-                |(name, obj)| -> DynResult {
-                    self.download_asset(
-                        &obj.hash,
-                        name,
-                        &minecraft_assets_objects_path,
-                        obj.size as u64,
-                        ar.sub(),
-                    )
-                },
-            );
             if is_repair {
-                let libraries_result = self.download_libraries(&version_meta.libraries);
+                let (assets_result, libraries_result) = rayon::join(
+                    || {
+                        run_parallel_tasks(
+                            self.parallel_amount,
+                            &assets_download_tasks,
+                            |(name, obj)| -> DynResult {
+                                self.download_asset(
+                                    &obj.hash,
+                                    name,
+                                    &minecraft_assets_objects_path,
+                                    obj.size as u64,
+                                    ar.clone(),
+                                )
+                            },
+                        )
+                    },
+                    || self.run_library_tasks(&lr, &library_tasks),
+                );
                 assets_result?;
                 libraries_result
             } else {
@@ -662,23 +602,39 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
                     || {
                         rayon::join(
                             || {
-                                self.download_vanilla_jar(
+                                self.download_vanilla_jar_reported(
+                                    &r,
                                     &main_jar.url,
                                     &game_file,
                                     &main_jar.sha1,
                                     main_jar.size as u64,
                                 )
                             },
-                            || self.download_libraries(&version_meta.libraries),
+                            || self.run_library_tasks(&lr, &library_tasks),
                         )
                     },
-                    || assets_result,
+                    || {
+                        run_parallel_tasks(
+                            self.parallel_amount,
+                            &assets_download_tasks,
+                            |(name, obj)| -> DynResult {
+                                self.download_asset(
+                                    &obj.hash,
+                                    name,
+                                    &minecraft_assets_objects_path,
+                                    obj.size as u64,
+                                    ar.clone(),
+                                )
+                            },
+                        )
+                    },
                 );
                 jar_result?;
                 assets_result?;
                 libraries_result
             }
         })?;
+        lr.remove_progress();
 
         // 1.6.x legacy / pre-1.6：对象下载完成后，为索引中的每个文件名生成虚拟副本。
         if let Some(virtual_id) = virtual_id {
@@ -701,6 +657,7 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             .natives_use_subdirectories()
             .then_some(NATIVE_SUBDIR);
         let nr = r.sub();
+        // 根分母已在下载开始前登记，这里只设置本进度条自己的分母。
         nr.set_max_progress(native_jars.len() as f64);
         nr.set_message("正在解压原生库".into());
         for (platform, items) in native_jars.iter() {
@@ -744,7 +701,9 @@ impl<R: Reporter> Downloader<R> {
         version_info: &VersionInfo,
         with_jar: bool,
     ) -> DynResult {
-        self.reporter.set_max_progress(4.);
+        // 不再在安装开始时把根分母重置为固定步数：各阶段（资源、JAR、依赖库、
+        // 原生库）会在开始前用 `add_max_progress` 一次性登记自己的字节总量，
+        // 分母随进度一起单调累加，避免绝对 `set` 把已累计的分母抹掉。
         self.reporter
             .set_message(format!("正在获取版本元数据 {version_name}"));
 
@@ -789,6 +748,164 @@ impl<R: Reporter> Downloader<R> {
         // 加载器所需的「原版运行前提」。
         self.download_vanilla(version_name, &version_meta, !with_jar)?;
 
+        Ok(())
+    }
+
+    /// 执行已登记的依赖库任务，并同时整理原生库解压映射
+    fn run_library_tasks(
+        &self,
+        r: &impl Reporter,
+        tasks: &[LibraryTask<'_>],
+    ) -> DynResult<HashMap<String, Vec<String>>> {
+        let mut native_jars_mapping: HashMap<String, Vec<String>> =
+            HashMap::with_capacity(tasks.len());
+        for task in tasks {
+            if let LibraryTask::Native {
+                platform,
+                sha1,
+                path,
+                size: _,
+            } = task
+            {
+                debug!("原生库 {platform} {sha1} {path}");
+                let p = format!("{}/{}", self.minecraft_library_path.as_str(), path);
+                if let Some(native_jars) = native_jars_mapping.get_mut(&platform.to_string()) {
+                    if !native_jars.contains(&p) {
+                        native_jars.push(p);
+                    }
+                } else {
+                    let mut native_jars = Vec::with_capacity(tasks.len());
+                    native_jars.push(p);
+                    native_jars_mapping.insert(platform.to_string(), native_jars);
+                }
+            }
+        }
+
+        run_parallel_tasks(self.parallel_amount, tasks, |task| -> DynResult {
+            match task {
+                LibraryTask::Common { sha1, path, size } => self.download_library_reported(
+                    r,
+                    sha1.to_string(),
+                    path.to_string(),
+                    *size,
+                    self.minecraft_library_path.as_str(),
+                ),
+                LibraryTask::Native {
+                    sha1, path, size, ..
+                } => self.download_library_reported(
+                    r,
+                    sha1.to_string(),
+                    path.to_string(),
+                    *size,
+                    self.minecraft_library_path.as_str(),
+                ),
+            }
+        })?;
+
+        Ok(native_jars_mapping)
+    }
+
+    /// 下载原版 JAR 并把文件体积作为进度增量
+    ///
+    /// 调用方负责预先登记 `max_progress`；这里只累加已完成字节数，避免
+    /// 多个并行任务在下载过程中反复修改总分母。
+    fn download_vanilla_jar_reported(
+        &self,
+        r: &impl Reporter,
+        path: &str,
+        save_path: &str,
+        sha1: &str,
+        size: u64,
+    ) -> DynResult {
+        let name = &save_path[save_path.rfind(std::path::is_separator).unwrap_or(0) + 1..];
+        r.set_message(format!("正在下载原版 {name}"));
+        if local_file_matches(Path::new(save_path), sha1, size, self.verify_data)? {
+            r.add_progress(size.max(1) as f64);
+            return Ok(());
+        }
+        fs_err::create_dir_all(
+            &save_path[..save_path
+                .rfind(std::path::is_separator)
+                .unwrap_or(save_path.len())],
+        )?;
+        let path = path.parse::<url::Url>()?;
+        let uris = [
+            match self.source {
+                DownloadSource::Default => {
+                    format!("https://launcher.mojang.com{}", path.path())
+                }
+                DownloadSource::BMCLAPI => {
+                    format!("https://bmclapi2.bangbang93.com{}", path.path())
+                }
+                _ => format!("https://launcher.mojang.com{}", path.path()),
+            },
+            format!("https://bmclapi2.bangbang93.com{}", path.path()),
+            format!("https://launcher.mojang.com{}", path.path()),
+        ];
+        let mut report = |delta: i64| r.add_progress(delta as f64);
+        download_with_sources_progress(
+            &uris,
+            save_path,
+            Some(sha1),
+            (size > 0).then_some(size),
+            JAR_SOURCE_TIMEOUT,
+            &mut report,
+        )
+        .map_err(|e| anyhow::anyhow!("下载原版游戏 Jar 失败：{:?}", e))?;
+        self.mark_file_repaired();
+        if size == 0 {
+            r.add_progress(1.);
+        }
+        Ok(())
+    }
+
+    /// 下载依赖库并把文件体积作为进度增量（不修改总分母）
+    fn download_library_reported(
+        &self,
+        r: &impl Reporter,
+        sha1: String,
+        path: String,
+        size: u64,
+        save_path: &str,
+    ) -> DynResult {
+        let full_path = format!("{save_path}/{path}");
+        r.set_message(format!("正在下载原版库 {path}"));
+        if local_file_matches(Path::new(&full_path), &sha1, size, self.verify_data)? {
+            r.add_progress(size.max(1) as f64);
+            return Ok(());
+        }
+        fs_err::create_dir_all(
+            &full_path[..full_path
+                .rfind(std::path::is_separator)
+                .unwrap_or(full_path.len())],
+        )?;
+        let default_uris = [
+            match self.source {
+                DownloadSource::Default => {
+                    format!("https://libraries.minecraft.net/{path}")
+                }
+                DownloadSource::BMCLAPI => {
+                    format!("https://bmclapi2.bangbang93.com/maven/{path}")
+                }
+                _ => format!("https://libraries.minecraft.net/{path}"),
+            },
+            format!("https://bmclapi2.bangbang93.com/maven/{path}"),
+            format!("https://libraries.minecraft.net/{path}"),
+        ];
+        let mut report = |delta: i64| r.add_progress(delta as f64);
+        download_with_sources_progress(
+            &default_uris,
+            &full_path,
+            (!sha1.is_empty()).then_some(sha1.as_str()),
+            (size > 0).then_some(size),
+            ASSET_SOURCE_TIMEOUT,
+            &mut report,
+        )
+        .map_err(|e| anyhow::anyhow!("下载库 {} 失败：{:?}", path, e))?;
+        self.mark_file_repaired();
+        if size == 0 {
+            r.add_progress(1.);
+        }
         Ok(())
     }
 }

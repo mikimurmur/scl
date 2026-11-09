@@ -40,6 +40,24 @@ struct ProgressState {
     sub_msg_layout: Option<PietTextLayout>,
 }
 
+/// 当前完成比例；分母为 0 或不定进度时视为 0
+fn progress_ratio(item: &ProgressState) -> f64 {
+    if item.indeterminate || item.max_progress <= 0. {
+        0.
+    } else {
+        (item.progress / item.max_progress).clamp(0., 1.)
+    }
+}
+
+/// 进度文本：字节级进度显示 MB，小粒度任务仍显示文件/步骤计数
+fn progress_amount_text(current: f64, max: f64) -> String {
+    if max >= 1_048_576. {
+        format!("{:.1}/{:.1} MB", current / 1_048_576., max / 1_048_576.)
+    } else {
+        format!("{}/{}", current.round(), max.round())
+    }
+}
+
 /// 一个进度显示组件，用于搭配 SCL Core 的进度报告功能显示正在处理的项目进度
 ///
 /// 在没有进度时会隐藏，当存在进度时将会占用一点位置来显示进度。
@@ -81,7 +99,7 @@ impl<T> ProgressOverlay<T> {
     fn should_update_progress(&self) -> bool {
         if self.should_display() {
             for p in self.progress_map.values() {
-                if p.current_progress != p.progress {
+                if !p.indeterminate && progress_ratio(p) > p.current_progress + 0.0001 {
                     return true;
                 }
             }
@@ -189,8 +207,16 @@ impl<T> ProgressOverlay<T> {
                 {
                     continue;
                 }
-                item.current_progress = item.current_progress
-                    + ((item.progress / item.max_progress) - item.current_progress) / 7.;
+                // 只允许向上追赶；分母或阶段变化不得让已显示的进度回退。
+                if !item.indeterminate {
+                    let target = progress_ratio(item);
+                    if target > item.current_progress {
+                        item.current_progress += (target - item.current_progress) / 7.;
+                        if target - item.current_progress < 0.0005 {
+                            item.current_progress = target;
+                        }
+                    }
+                }
                 let text = ctx.text();
                 if item.msg_layout.is_none() {
                     item.msg_layout = text
@@ -209,8 +235,8 @@ impl<T> ProgressOverlay<T> {
                 if item.sub_msg_layout.is_none() {
                     item.sub_msg_layout = text
                         .new_text_layout(if item.sub_msg.is_empty() {
-                            if item.progress.round() != item.max_progress.round() {
-                                format!("{}/{}", item.progress.round(), item.max_progress.round())
+                            if progress_ratio(item) < 0.9995 {
+                                progress_amount_text(item.progress, item.max_progress)
                             } else {
                                 "".into()
                             }
@@ -317,7 +343,13 @@ impl<T: Data> Widget<T> for ProgressOverlay<T> {
                 }
             }
             Event::AnimFrame(_) => {
-                if self.should_update_progress() || !self.progress_height_spring.arrived() {
+                let spring_moving = !self.progress_height_spring.arrived();
+                if spring_moving {
+                    // 只有遮罩展开/收起的高度变化才需要重新布局；
+                    // 进度数值变化只需重绘，不能每帧 request_layout。
+                    ctx.request_layout();
+                }
+                if spring_moving || self.should_update_progress() {
                     // Linux 不接入系统任务栏进度；
                     // GTK 后端没有 RawWindowHandle，取句柄会在每一帧打印
                     // “HasRawWindowHandle trait not implemented for gtk.”。
@@ -327,7 +359,6 @@ impl<T: Data> Widget<T> for ProgressOverlay<T> {
                     }
                     ctx.request_paint();
                     ctx.request_anim_frame();
-                    ctx.request_layout();
                 }
             }
             Event::Command(cmd) => {
@@ -391,7 +422,9 @@ impl<T: Data> Widget<T> for ProgressOverlay<T> {
                         v.progress = p.1;
                         if v.indeterminate {
                             v.indeterminate = false;
-                            v.current_progress = v.progress;
+                            // 从不定进度切换到确定进度时从当前比例起步，
+                            // 不能把绝对进度值当作已完成比例（否则会瞬间满格）。
+                            v.current_progress = progress_ratio(v);
                         }
                         if v.sub_msg.is_empty() {
                             v.sub_msg_layout = None;
@@ -476,5 +509,40 @@ impl<T: Data> Widget<T> for ProgressOverlay<T> {
     fn paint(&mut self, ctx: &mut PaintCtx, data: &T, env: &Env) {
         ctx.with_save(|ctx| self.inner.paint(ctx, data, env));
         self.paint_progress(ctx, data, env);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{progress_amount_text, progress_ratio, ProgressState};
+
+    fn state(progress: f64, max: f64, indeterminate: bool) -> ProgressState {
+        ProgressState {
+            max_progress: max,
+            progress,
+            current_progress: 0.,
+            indeterminate,
+            msg: String::new(),
+            msg_layout: None,
+            sub_msg: String::new(),
+            sub_msg_layout: None,
+        }
+    }
+
+    /// 分母为 0、不定进度、超出范围时都必须返回可绘制的合法比例。
+    #[test]
+    fn ratio_is_always_within_unit_range() {
+        assert_eq!(progress_ratio(&state(0., 0., false)), 0.);
+        assert_eq!(progress_ratio(&state(50., 100., false)), 0.5);
+        assert_eq!(progress_ratio(&state(50., 100., true)), 0.);
+        assert_eq!(progress_ratio(&state(150., 100., false)), 1.);
+        assert_eq!(progress_ratio(&state(-1., 100., false)), 0.);
+    }
+
+    /// 字节级进度以 MB 显示，小粒度任务仍显示计数，避免出现一百万分之一的文本。
+    #[test]
+    fn amount_text_uses_bytes_only_for_byte_scale_tasks() {
+        assert_eq!(progress_amount_text(1_048_576., 2_097_152.), "1.0/2.0 MB");
+        assert_eq!(progress_amount_text(3., 5.), "3/5");
     }
 }

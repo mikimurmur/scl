@@ -350,6 +350,17 @@ fn should_back_on_key(back_page_enabled: bool, code: druid::Code, repeat: bool) 
     back_page_enabled && code == druid::Code::Escape && !repeat
 }
 
+/// 启动失败后是否安排自动修复 + 重试。
+///
+/// 只看三个条件：配置开关、当前启动周期是否已重试过、游戏窗口是否曾经出现。
+fn should_schedule_auto_repair(
+    enabled: bool,
+    retry_latch: bool,
+    launch_window_ready: bool,
+) -> bool {
+    enabled && !retry_latch && !launch_window_ready
+}
+
 /// 将配置保存到磁盘
 pub fn save_config(data: &AppState) {
     let cfg = data.config.to_owned();
@@ -1112,59 +1123,7 @@ impl AppWrapper {
                 if self.last_page != PAGE_LAUNCH_ERROR {
                     show_launch_error_page(ctx);
                 }
-                if data.config.auto_check_when_first_start_failed && !data.auto_recheck_retry {
-                    data.auto_recheck_retry = true;
-                    data.launch_error_logs
-                        .push_back("启动游戏失败，正在尝试检查文件完整性".into());
-                    let folder = data.config.minecraft_folder.to_path_buf();
-                    let version_base = data.versions_folder();
-                    let version_name = data.launching_version.clone();
-                    let source = data.config.download_source.clone();
-                    let parallel_amount = data.config.download_parallel_amount;
-                    let sink = ctx.get_external_handle();
-                    thread_main(move || {
-                        // 自动修复必须在界面上可见：官方同一路径使用
-                        let progress = Progress::new(sink.clone());
-                        scl_core::progress::Reporter::send(
-                            &progress,
-                            scl_core::progress::ReportState::SetMessage(format!(
-                                "正在尝试检查版本 {version_name} 的文件完整性"
-                            )),
-                        );
-                        // 只修复本次要启动的那个版本（及其继承链），
-                        // 不再遍历 versions 目录，避免无关版本被补全。
-                        let version_info = scl_core::version::structs::VersionInfo {
-                            version_base: version_base.to_string_lossy().to_string(),
-                            version: version_name.clone(),
-                            ..Default::default()
-                        };
-                        match crate::utils::fix_minecraft::fix_minecraft_version(
-                            &folder,
-                            &version_info,
-                            source,
-                            parallel_amount,
-                            progress.clone(),
-                        ) {
-                            Ok(fixed) => {
-                                tracing::info!(
-                                    "版本 {version_name} 文件完整性检查完成，修复了 {fixed} 个文件"
-                                );
-                            }
-                            Err(err) => {
-                                tracing::warn!("版本 {version_name} 文件完整性检查失败：{err:?}");
-                            }
-                        }
-                        progress.remove();
-                        // 无论修复成功、失败还是无可修，官方都进行恰好一次
-                        // 二次启动（无计数器、无退避）；修复自身已在下载层
-                        // 做了有界等待，不会永久挂起。
-                        let _ =
-                            sink.submit_command(APP_EVENT, AppEvent::RecheckRetry, Target::Global);
-                        Ok(())
-                    });
-                } else {
-                    data.auto_recheck_retry = false;
-                }
+                Self::schedule_auto_repair(ctx, data);
             }
             AppEvent::RecheckRetry => {
                 // 只有闩锁仍为真（重试已安排且未被终态复位）才重新启动，
@@ -1203,8 +1162,8 @@ impl AppWrapper {
                 data.launching = false;
                 // 注意：不要在这里清 starting_tip。官方进程 spawn 后启动页仍显示
                 // 「你知道吗」卡片；本地曾在 GameStarted 时清空，导致卡片变成空白框。
-                // 启动成功即终态：复位重试闩锁，下一次手动启动重新拥有一次重试。
-                data.auto_recheck_retry = false;
+                // 这里也不能复位 auto_recheck_retry：自动重试轮尚未证明成功，
+                // 若此时崩溃会被误判为新一轮失败而无限重试；成功在 GameWindowReady 复位。
                 let sink = ctx.get_external_handle();
                 let wait_until_launched = data.config.wait_until_launched;
                 thread_main(move || {
@@ -1231,6 +1190,9 @@ impl AppWrapper {
             AppEvent::GameWindowReady => {
                 if !data.launch_window_ready && data.launch_error.is_none() {
                     data.launch_window_ready = true;
+                    // 启动成功（含自动重试成功）：复位重试闩锁，
+                    // 下一次手动启动重新拥有一次自动修复机会。
+                    data.auto_recheck_retry = false;
                     tracing::info!("游戏窗口已出现，执行启动器收尾");
                     if data.config.hide_window_when_launched {
                         #[cfg(target_os = "windows")]
@@ -1256,16 +1218,21 @@ impl AppWrapper {
             // 带完整游戏输出与日志文件/剪切板操作，而不是静默回到主页。
             AppEvent::GameCrashed(code) => {
                 tracing::warn!("游戏进程异常退出，返回值：{code:?}");
-                if data.launch_error.is_none() {
-                    let message = format!(
-                        "游戏进程异常退出，返回值：{}",
-                        code.map(|c| c.to_string()).unwrap_or_else(|| "未知".into())
-                    );
-                    data.launch_error = Some(message);
-                    // 与启动失败一样走官方终态序列：先把 `starting` 弹回
-                    // 主页再推错误页，错误页返回才会落在主界面。
+                data.launching = false;
+                data.starting_tip = None;
+                let message = format!(
+                    "游戏进程异常退出，返回值：{}",
+                    code.map(|c| c.to_string()).unwrap_or_else(|| "未知".into())
+                );
+                data.launch_error = Some(message.clone());
+                data.launch_error_logs.push_back(message);
+                // 已在错误页时（自动重试轮再次失败）不重复弹栈，避免错误页闪烁。
+                if self.last_page != PAGE_LAUNCH_ERROR {
                     show_launch_error_page(ctx);
                 }
+                // 启动期崩溃（窗口尚未出现）与 LaunchFailed 一样走自动修复 + 重试；
+                // 游戏窗口出现后运行中途崩溃不自动重启，只停在错误页。
+                Self::schedule_auto_repair(ctx, data);
             }
             AppEvent::ModrinthLoaded {
                 mods,
@@ -1657,6 +1624,73 @@ impl Widget<AppState> for AppWrapper {
 }
 
 impl AppWrapper {
+    /// 启动失败/启动期崩溃后安排一次自动文件修复与重试。
+    ///
+    /// 触发条件：
+    /// - 配置开关 `auto_check_when_first_start_failed` 为真；
+    /// - 当前启动周期尚未安排过自动重试（`auto_recheck_retry` 闩锁为假）；
+    /// - 游戏尚未真正显示窗口（`launch_window_ready` 为假），避免游戏中途
+    ///   崩溃时意外重启游戏。
+    ///
+    /// 修复只针对本次启动的版本（含继承链），完成后提交 `RecheckRetry`。
+    /// 返回是否安排了自动重试。
+    fn schedule_auto_repair(ctx: &mut EventCtx, data: &mut AppState) -> bool {
+        if !should_schedule_auto_repair(
+            data.config.auto_check_when_first_start_failed,
+            data.auto_recheck_retry,
+            data.launch_window_ready,
+        ) {
+            data.auto_recheck_retry = false;
+            return false;
+        }
+        data.auto_recheck_retry = true;
+        data.launch_error_logs
+            .push_back("启动游戏失败，正在尝试检查文件完整性".into());
+        let folder = data.config.minecraft_folder.to_path_buf();
+        let version_base = data.versions_folder();
+        let version_name = data.launching_version.clone();
+        let source = data.config.download_source.clone();
+        let parallel_amount = data.config.download_parallel_amount;
+        let sink = ctx.get_external_handle();
+        thread_main(move || {
+            // 自动修复必须在界面上可见：官方同一路径使用
+            let progress = Progress::new(sink.clone());
+            scl_core::progress::Reporter::send(
+                &progress,
+                scl_core::progress::ReportState::SetMessage(format!(
+                    "正在尝试检查版本 {version_name} 的文件完整性"
+                )),
+            );
+            // 只修复本次要启动的那个版本（及其继承链），
+            // 不再遍历 versions 目录，避免无关版本被补全。
+            let version_info = scl_core::version::structs::VersionInfo {
+                version_base: version_base.to_string_lossy().to_string(),
+                version: version_name.clone(),
+                ..Default::default()
+            };
+            match crate::utils::fix_minecraft::fix_minecraft_version(
+                &folder,
+                &version_info,
+                source,
+                parallel_amount,
+                progress.clone(),
+            ) {
+                Ok(fixed) => {
+                    tracing::info!("版本 {version_name} 文件完整性检查完成，修复了 {fixed} 个文件");
+                }
+                Err(err) => {
+                    tracing::warn!("版本 {version_name} 文件完整性检查失败：{err:?}");
+                }
+            }
+            progress.remove();
+            // 无论修复成功、失败还是无可修，官方都进行恰好一次二次启动；
+            // 修复自身已在下载层做了有界等待，不会永久挂起。
+            let _ = sink.submit_command(APP_EVENT, AppEvent::RecheckRetry, Target::Global);
+            Ok(())
+        });
+        true
+    }
+
     /// 绘制主页启动按钮的完整版本名提示。
     ///
     /// 提示必须画在根组件上：按钮自身的 `WidgetPod` 会被裁到按钮矩形，
@@ -1832,7 +1866,7 @@ fn login_authlib(ctx: &mut EventCtx, data: &mut AppState) {
 mod tests {
     use druid::Code;
 
-    use super::should_back_on_key;
+    use super::{should_back_on_key, should_schedule_auto_repair};
 
     #[test]
     fn escape_backs_when_button_is_available() {
@@ -1855,5 +1889,25 @@ mod tests {
     fn other_keys_are_not_back() {
         assert!(!should_back_on_key(true, Code::Enter, false));
         assert!(!should_back_on_key(true, Code::KeyE, false));
+    }
+
+    #[test]
+    fn auto_repair_only_for_first_startup_failure() {
+        assert!(
+            should_schedule_auto_repair(true, false, false),
+            "首次启动失败且开关开启时应自动修复"
+        );
+        assert!(
+            !should_schedule_auto_repair(false, false, false),
+            "关闭自动检查时不应修复"
+        );
+        assert!(
+            !should_schedule_auto_repair(true, true, false),
+            "自动重试已经进行过一次时不应再次修复"
+        );
+        assert!(
+            !should_schedule_auto_repair(true, false, true),
+            "游戏窗口已出现后的中途崩溃不应自动重启"
+        );
     }
 }

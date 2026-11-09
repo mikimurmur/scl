@@ -695,11 +695,16 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             self.minecraft_version_path.as_str(),
             version_name
         );
+        // 26.3+ 的 JVM 参数要求 java.library.path 指向 `${natives_directory}/java`，
+        // 原生库必须解压到该子目录；老版本仍解压到 `${natives_directory}` 本身。
+        let natives_subdir = version_meta
+            .natives_use_subdirectories()
+            .then_some(NATIVE_SUBDIR);
         let nr = r.sub();
         nr.set_max_progress(native_jars.len() as f64);
         nr.set_message("正在解压原生库".into());
         for (platform, items) in native_jars.iter() {
-            let native_dir = format!("{native_dir}/{platform}");
+            let native_dir = native_extract_dir(&native_dir, platform, natives_subdir);
             for item in items {
                 // 修复只补缺失：目标目录里已有全部 native 文件时跳过解压。
                 if natives_need_extract(item, &native_dir) {
@@ -789,6 +794,19 @@ impl<R: Reporter> Downloader<R> {
 }
 
 const NATIVE_EXTS: &[&str] = &["dll", "so", "dylib", "jnilib"];
+/// 26.3+ 原生库的 JVM 搜索子目录名（对应 `java.library.path=${natives_directory}/java`）
+const NATIVE_SUBDIR: &str = "java";
+
+/// 计算某个平台的原生库解压目录
+///
+/// 老版本直接解压到 `<natives>/<platform>`；26.3+ 需要多一层 `java` 子目录，
+/// 与 JVM 参数里的 `${natives_directory}/java` 对齐。
+fn native_extract_dir(base: &str, platform: &str, subdir: Option<&str>) -> String {
+    match subdir {
+        Some(subdir) => format!("{base}/{platform}/{subdir}"),
+        None => format!("{base}/{platform}"),
+    }
+}
 
 /// 判断 native 压缩包中是否还有未落盘的文件。
 ///
@@ -866,6 +884,54 @@ pub fn unzip_natives(unzip_file: &str, unzip_dir: &str) -> DynResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_extract_dir_matches_metadata_generation() {
+        let legacy: VersionMeta = serde_json::from_str(
+            r#"{
+                "mainClass": "net.minecraft.client.main.Main",
+                "arguments": {
+                    "game": [],
+                    "jvm": ["-Djava.library.path=${natives_directory}"]
+                },
+                "libraries": []
+            }"#,
+        )
+        .expect("解析旧版元数据");
+        assert!(
+            !legacy.natives_use_subdirectories(),
+            "1.21.x 应保持平铺布局"
+        );
+        assert_eq!(
+            native_extract_dir("/v/1.21.1/natives", "natives-linux", None),
+            "/v/1.21.1/natives/natives-linux"
+        );
+
+        let modern: VersionMeta = serde_json::from_str(
+            r#"{
+                "mainClass": "net.minecraft.client.main.Main",
+                "arguments": {
+                    "game": [],
+                    "jvm": [
+                        "-Djava.library.path=${natives_directory}/java",
+                        "-Djna.tmpdir=${natives_directory}/jna",
+                        "-Dorg.lwjgl.system.SharedLibraryExtractPath=${natives_directory}/lwjgl",
+                        "-Dio.netty.native.workdir=${natives_directory}/netty"
+                    ]
+                },
+                "libraries": []
+            }"#,
+        )
+        .expect("解析 26.3 元数据");
+        assert!(
+            modern.natives_use_subdirectories(),
+            "26.3 应识别为子目录布局"
+        );
+        assert_eq!(
+            native_extract_dir("/v/26.3/natives", "natives-linux", Some(NATIVE_SUBDIR)),
+            "/v/26.3/natives/natives-linux/java"
+        );
+    }
 
     /// 索引文件存在且可解析时必须复用，不能发起网络请求。
     #[test]

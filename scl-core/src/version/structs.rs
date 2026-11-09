@@ -327,6 +327,26 @@ pub struct VersionMeta {
 }
 
 impl VersionMeta {
+    /// 26.3+ 的 natives 使用 `${natives_directory}/java` 等子目录
+    ///
+    /// 老版本（1.21.x、26.1.x）的 JVM 参数直接使用 `${natives_directory}`；
+    /// 26.3 起改为 `${natives_directory}/java`、`/jna`、`/lwjgl`、`/netty`，
+    /// 原生库需要解压到对应的 `java` 子目录，否则 `java.library.path` 会指向
+    /// 一个不存在的目录。
+    pub(crate) fn natives_use_subdirectories(&self) -> bool {
+        self.arguments.as_ref().is_some_and(|arguments| {
+            arguments.jvm.iter().any(|argument| {
+                let values: &[String] = match argument {
+                    Argument::Common(value) => std::slice::from_ref(value),
+                    Argument::Specify(spec) => &spec.value,
+                };
+                values
+                    .iter()
+                    .any(|value| value.contains("${natives_directory}/"))
+            })
+        })
+    }
+
     pub(crate) fn fix_libraries(&mut self) {
         for library in &mut self.libraries {
             if library.rules.is_allowed()

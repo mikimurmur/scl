@@ -413,10 +413,12 @@ impl<T: Data> Widget<T> for WrapLabel<T> {
 
 #[cfg(test)]
 mod tests {
-    use druid::debug_state::DebugState;
-    use druid::tests::harness::Harness;
-    use druid::widget::{EnvScope, Flex, SizedBox};
-    use druid::{Data, Env};
+    use druid::{
+        debug_state::DebugState,
+        tests::harness::Harness,
+        widget::{EnvScope, Flex, SizedBox},
+        Data, Env,
+    };
 
     use super::StartGameButton;
     use crate::theme::color::{set_color_to_env, Theme};

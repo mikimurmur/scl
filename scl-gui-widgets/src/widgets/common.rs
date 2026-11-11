@@ -89,9 +89,8 @@ fn common_button_background(
 mod tests {
     use druid::{Color, Env};
 
-    use crate::theme::color as theme;
-
     use super::common_button_background;
+    use crate::theme::color as theme;
 
     fn over(foreground: Color, background: Color) -> Color {
         let (r, g, b, a) = foreground.as_rgba();

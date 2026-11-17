@@ -1196,7 +1196,11 @@ impl AppWrapper {
                     tracing::info!("游戏窗口已出现，执行启动器收尾");
                     if data.config.hide_window_when_launched {
                         #[cfg(target_os = "windows")]
-                        starting::hide_launcher_window();
+                        if let druid::RawWindowHandle::Win32(handle) =
+                            druid::HasRawWindowHandle::raw_window_handle(ctx.window())
+                        {
+                            starting::hide_launcher_window(handle.hwnd as isize);
+                        }
                         let window = ctx.window_id();
                         ctx.submit_command(commands::HIDE_WINDOW.to(Target::Window(window)));
                     }

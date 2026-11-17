@@ -234,29 +234,32 @@ pub fn run_updater(args: &[String]) -> anyhow::Result<()> {
     let new_file = std::path::Path::new(new_file);
     let target = std::path::Path::new(target);
 
-    // 正在运行的程序文件在 Windows 上无法被覆盖，重试直到成功
-    let old_file = {
-        let mut name = target
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        name.push_str(".scl-old");
-        target.with_file_name(name)
-    };
+    if !new_file.is_file() {
+        anyhow::bail!("更新文件不存在：{}", new_file.display());
+    }
+
+    // Windows 上正在运行的程序文件无法被替换；目标进程退出后，std 的
+    // rename 使用 MoveFileExW(MOVEFILE_REPLACE_EXISTING) 原子替换同卷文件。
+    // 旧实现先把目标改名为 .scl-old，再改名新文件：如果第二步失败，
+    // 旧文件已经被移走，下一次重试会删掉唯一的旧版本并永久循环。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
-        let _ = fs_err::remove_file(&old_file);
-        match fs_err::rename(target, &old_file).and_then(|()| fs_err::rename(new_file, target)) {
+        match fs_err::rename(new_file, target) {
             Ok(()) => break,
-            Err(_) => {
+            Err(err) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(anyhow::anyhow!("等待旧版本退出并替换可执行文件失败：{err}"));
+                }
                 std::thread::sleep(std::time::Duration::from_millis(300));
             }
         }
     }
 
-    // 新版本启动时负责清理临时文件
+    // 新版本启动时负责清理临时文件。传入已被移走的新文件路径，
+    // run_post_updater 会据此定位并删除更新临时目录。
     std::process::Command::new(target)
         .arg("--post-update")
-        .arg(&old_file)
+        .arg(new_file)
         .spawn()?;
     Ok(())
 }

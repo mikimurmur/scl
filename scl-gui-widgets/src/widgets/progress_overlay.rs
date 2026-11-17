@@ -69,6 +69,11 @@ pub struct ProgressOverlay<T> {
     progress_height_spring: Spring,
     progress_map: BTreeMap<usize, ProgressState>,
 
+    /// Windows 的任务栏 COM 对象只创建一次。此前每帧都
+    /// `CoCreateInstance`，下载进度密集刷新时会持续创建/销毁 COM 对象。
+    #[cfg(target_os = "windows")]
+    taskbar: Option<taskbar_interface::TaskbarInterface>,
+
     inner: WidgetPod<T, Box<dyn Widget<T>>>,
 }
 
@@ -80,6 +85,8 @@ impl<T> ProgressOverlay<T> {
             progress_expanding: false,
             progress_height_spring: Spring::new(0.),
             progress_map: BTreeMap::new(),
+            #[cfg(target_os = "windows")]
+            taskbar: None,
             inner: WidgetPod::new(Box::new(inner)),
         }
     }
@@ -107,39 +114,69 @@ impl<T> ProgressOverlay<T> {
         false
     }
 
+    /// Windows 任务栏接口只在第一次需要时创建，之后复用同一个 COM 对象。
+    #[cfg(target_os = "windows")]
+    fn taskbar(
+        &mut self,
+        handle: RawWindowHandle,
+    ) -> Option<&mut taskbar_interface::TaskbarInterface> {
+        use taskbar_interface::*;
+
+        if self.taskbar.is_none() {
+            let display = raw_window_handle_5::RawDisplayHandle::Windows(
+                raw_window_handle_5::WindowsDisplayHandle::empty(),
+            );
+            match TaskbarInterface::new(handle, display) {
+                Ok(indicator) => self.taskbar = Some(indicator),
+                Err(err) => {
+                    tracing::debug!("创建 Windows 任务栏进度接口失败：{err}");
+                    return None;
+                }
+            }
+        }
+        self.taskbar.as_mut()
+    }
+
     /// Windows/macOS 任务栏进度；调用点位于同名 cfg 块内，
     /// Linux 构建不编译该方法（官方 Linux 版也不接系统任务栏）。
     #[cfg(any(target_os = "windows", target_os = "macos"))]
-    fn update_taskbar_progress(&self, _handle: RawWindowHandle) {
+    fn update_taskbar_progress(&mut self, _handle: RawWindowHandle) {
         #[cfg(target_os = "windows")]
         {
             use taskbar_interface::*;
-            if let Ok(mut indicator) = TaskbarInterface::new(
-                _handle,
-                raw_window_handle_5::RawDisplayHandle::Windows(
-                    raw_window_handle_5::WindowsDisplayHandle::empty(),
-                ),
-            ) {
-                if self.progress_map.is_empty() {
-                    let _ = indicator.set_progress_state(ProgressIndicatorState::NoProgress);
-                } else if self.progress_map.iter().all(|x| x.1.indeterminate) {
-                    let _ = indicator.set_progress_state(ProgressIndicatorState::Indeterminate);
-                } else {
-                    // let _ = indicator.set_progress_state(ProgressIndicatorState::Normal);
-                    let max_progress: f64 = self
-                        .progress_map
-                        .iter()
-                        .filter(|x| !x.1.indeterminate)
-                        .map(|x| x.1.max_progress)
-                        .sum();
-                    let cur_progress: f64 = self
-                        .progress_map
-                        .iter()
-                        .filter(|x| !x.1.indeterminate)
-                        .map(|x| x.1.progress.max(0.0))
-                        .sum();
-                    let _ = indicator.set_progress((cur_progress / max_progress).clamp(0.0, 1.0));
-                }
+
+            let all_indeterminate = !self.progress_map.is_empty()
+                && self.progress_map.values().all(|item| item.indeterminate);
+            let max_progress: f64 = self
+                .progress_map
+                .values()
+                .filter(|item| !item.indeterminate)
+                .map(|item| item.max_progress)
+                .sum();
+            let cur_progress: f64 = self
+                .progress_map
+                .values()
+                .filter(|item| !item.indeterminate)
+                .map(|item| item.progress.max(0.0))
+                .sum();
+            let state = if self.progress_map.is_empty() {
+                ProgressIndicatorState::NoProgress
+            } else if all_indeterminate {
+                ProgressIndicatorState::Indeterminate
+            } else {
+                ProgressIndicatorState::Normal
+            };
+
+            let Some(indicator) = self.taskbar(_handle) else {
+                return;
+            };
+            let _ = indicator.set_progress_state(state);
+            if state == ProgressIndicatorState::Normal && max_progress > 0.0 {
+                // taskbar_interface 的 Windows 实现只写入数值，不会像 Linux
+                // 实现那样自动把状态切回 Normal；必须先显式设置状态再写进度，
+                // 否则从不定进度转为确定进度后任务栏会一直保持跑马灯。
+                let ratio = (cur_progress / max_progress).clamp(0.0, 1.0);
+                let _ = indicator.set_progress(ratio);
             }
         }
         #[cfg(target_os = "macos")]
@@ -153,23 +190,26 @@ impl<T> ProgressOverlay<T> {
             ) {
                 if self.progress_map.is_empty() {
                     let _ = indicator.set_progress_state(ProgressIndicatorState::NoProgress);
-                } else if self.progress_map.iter().all(|x| x.1.indeterminate) {
+                } else if self.progress_map.values().all(|item| item.indeterminate) {
                     let _ = indicator.set_progress_state(ProgressIndicatorState::Indeterminate);
                 } else {
-                    // let _ = indicator.set_progress_state(ProgressIndicatorState::Normal);
                     let max_progress: f64 = self
                         .progress_map
-                        .iter()
-                        .filter(|x| !x.1.indeterminate)
-                        .map(|x| x.1.max_progress)
+                        .values()
+                        .filter(|item| !item.indeterminate)
+                        .map(|item| item.max_progress)
                         .sum();
                     let cur_progress: f64 = self
                         .progress_map
-                        .iter()
-                        .filter(|x| !x.1.indeterminate)
-                        .map(|x| x.1.progress.max(0.0))
+                        .values()
+                        .filter(|item| !item.indeterminate)
+                        .map(|item| item.progress.max(0.0))
                         .sum();
-                    let _ = indicator.set_progress((cur_progress / max_progress).clamp(0.0, 1.0));
+                    let _ = indicator.set_progress_state(ProgressIndicatorState::Normal);
+                    if max_progress > 0.0 {
+                        let ratio = (cur_progress / max_progress).clamp(0.0, 1.0);
+                        let _ = indicator.set_progress(ratio);
+                    }
                 }
             }
         }
@@ -394,13 +434,7 @@ impl<T: Data> Widget<T> for ProgressOverlay<T> {
                     }
                     #[cfg(target_os = "windows")]
                     if self.progress_map.is_empty() && self.show_progress_on_taskbar {
-                        use taskbar_interface::*;
-                        if let Ok(mut indicator) = TaskbarInterface::new(
-                            ctx.window().raw_window_handle(),
-                            raw_window_handle_5::RawDisplayHandle::Windows(
-                                raw_window_handle_5::WindowsDisplayHandle::empty(),
-                            ),
-                        ) {
+                        if let Some(indicator) = self.taskbar(ctx.window().raw_window_handle()) {
                             let _ = indicator.needs_attention(true);
                         }
                     }

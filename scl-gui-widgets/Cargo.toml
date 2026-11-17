@@ -26,12 +26,14 @@ raw-window-handle-5 = { package = "raw-window-handle", version = "0.5" }
 raw-window-handle-6 = { package = "raw-window-handle", version = "0.6" }
 serde = { version = "1.0", features = ["derive"] }
 tracing = "*"
-taskbar_interface = { git = "https://github.com/Steve-xmh/taskbar_interface.git" }
+# 本地 vendored 版本把 windows 依赖升级到 0.62，修复上游 git 依赖的 0.52 锁定。
+taskbar_interface = { path = "../vendor/taskbar_interface" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "*"
 cocoa = "*"
 libc = "*"
 
-[target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "*", features = ["processthreadsapi", "winuser", "libloaderapi"] }
+[target.'cfg(target_os = "windows")'.dependencies.windows]
+version = "0.62.2"
+features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"]

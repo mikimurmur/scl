@@ -1,0 +1,48 @@
+[package]
+name = "taskbar_interface"
+version = "0.1.0"
+edition = "2018"
+license = "MIT"
+description = "An interface to the desktop taskbar"
+documentation = "https://docs.rs/taskbar_interface"
+repository = "https://github.com/sandmor/taskbar_interface"
+readme = "README.md"
+keywords = ["taskbar", "interfaces", "ui"]
+categories = ["gui"]
+
+[dependencies]
+raw-window-handle = "0.5"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+once_cell = "1.18"
+
+[target.'cfg(target_os = "macos")'.dependencies.icrate]
+version = "0.0.4"
+features = [
+    "AppKit",
+    "AppKit_NSApplication",
+    "AppKit_NSDockTile",
+    "AppKit_NSImage",
+    "AppKit_NSImageView",
+    "AppKit_NSProgressIndicator",
+    "Foundation",
+    "Foundation_NSString",
+]
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+once_cell = "1.18"
+x11-dl = "2"
+dbus = "0.9"
+x11rb = { version = "0.11", features = ["allow-unsafe-code", "dl-libxcb"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_SystemServices",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+

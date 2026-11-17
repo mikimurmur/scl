@@ -61,7 +61,7 @@ pub const NATIVE_ARCH: &str = "64";
 ///
 /// 用于版本元数据的参数和依赖库的条件判断
 #[cfg(target_arch = "arm")]
-pub const NATIVE_ARCH: &str = "64";
+pub const NATIVE_ARCH: &str = "32";
 /// 根据当前构建目标判定的当前操作系统的操作位数
 ///
 /// 用于版本元数据的参数和依赖库的条件判断
@@ -265,7 +265,8 @@ fn get_system_arch() -> Arch {
             0 => Arch::X86,
             12 => Arch::ARM64,
             9 => Arch::X64,
-            _ => unreachable!(),
+            // 未知架构（例如 32 位 ARM）回退到编译目标架构，避免启动器 panic。
+            _ => Arch::default(),
         }
     }
     #[cfg(all(target_os = "linux", target_arch = "x86"))]
@@ -429,7 +430,12 @@ pub fn get_mem_status() -> MemoryStatus {
             dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as _,
             ..Default::default()
         };
-        windows::Win32::System::SystemInformation::GlobalMemoryStatusEx(&mut ms).unwrap();
+        if windows::Win32::System::SystemInformation::GlobalMemoryStatusEx(&mut ms).is_err() {
+            return MemoryStatus {
+                max: 2048,
+                free: 2048,
+            };
+        }
         MemoryStatus {
             max: ms.ullTotalPhys / 1024 / 1024,
             free: ms.ullAvailPhys / 1024 / 1024,

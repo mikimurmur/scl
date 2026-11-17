@@ -385,38 +385,42 @@ impl<T: Data> Widget<T> for WindowWidget<T> {
             #[cfg(target_os = "windows")]
             if let RawWindowHandle::Win32(handle) = ctx.window().raw_window_handle() {
                 unsafe {
-                    use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
-
-                    use winapi::{
-                        shared::{minwindef::*, windef::*},
-                        um::winuser::{LoadImageW, SendMessageW, IMAGE_ICON, WM_SETICON},
+                    use windows::{
+                        core::PCWSTR,
+                        Win32::{
+                            Foundation::{HINSTANCE, HWND, LPARAM, WPARAM},
+                            UI::WindowsAndMessaging::{
+                                LoadImageW, SendMessageW, ICON_BIG, ICON_SMALL, IMAGE_ICON,
+                                LR_SHARED, WM_SETICON,
+                            },
+                        },
                     };
-                    let small_icon = LoadImageW(
-                        handle.hinstance as _,
-                        OsStr::new("ICON")
-                            .encode_wide()
-                            .chain(Some(0))
-                            .collect::<Vec<u16>>()
-                            .as_ptr(),
-                        IMAGE_ICON,
-                        16,
-                        16,
-                        0,
-                    );
-                    let big_icon = LoadImageW(
-                        handle.hinstance as _,
-                        OsStr::new("ICON")
-                            .encode_wide()
-                            .chain(Some(0))
-                            .collect::<Vec<u16>>()
-                            .as_ptr(),
-                        IMAGE_ICON,
-                        32,
-                        32,
-                        0,
-                    );
-                    SendMessageW(handle.hwnd as _, WM_SETICON, 0, small_icon as LPARAM);
-                    SendMessageW(handle.hwnd as _, WM_SETICON, 1, big_icon as LPARAM);
+                    // Druid 注册窗口类时按资源 ID 1 取图标；这里使用同一个
+                    // 资源加载 16/32px 图标，而不是查找名为 "ICON" 的字符串
+                    // 资源（源码树里并没有这样的资源，原写法会清空窗口图标）。
+                    let hwnd = HWND(handle.hwnd);
+                    let instance = HINSTANCE(handle.hinstance);
+                    let resource = PCWSTR(1 as _);
+                    let small_icon =
+                        LoadImageW(Some(instance), resource, IMAGE_ICON, 16, 16, LR_SHARED);
+                    if let Ok(icon) = small_icon {
+                        SendMessageW(
+                            hwnd,
+                            WM_SETICON,
+                            Some(WPARAM(ICON_SMALL as usize)),
+                            Some(LPARAM(icon.0 as isize)),
+                        );
+                    }
+                    let big_icon =
+                        LoadImageW(Some(instance), resource, IMAGE_ICON, 32, 32, LR_SHARED);
+                    if let Ok(icon) = big_icon {
+                        SendMessageW(
+                            hwnd,
+                            WM_SETICON,
+                            Some(WPARAM(ICON_BIG as usize)),
+                            Some(LPARAM(icon.0 as isize)),
+                        );
+                    }
                     struct WinHandle {
                         handle: HWND,
                         instance: HINSTANCE,
@@ -426,8 +430,8 @@ impl<T: Data> Widget<T> for WindowWidget<T> {
                         unsafe impl HasRawWindowHandle for WinHandle {
                             fn raw_window_handle(&self) -> RawWindowHandle {
                                 let mut handle = Win32WindowHandle::empty();
-                                handle.hwnd = self.handle as _;
-                                handle.hinstance = self.instance as _;
+                                handle.hwnd = self.handle.0 as _;
+                                handle.hinstance = self.instance.0 as _;
                                 RawWindowHandle::Win32(handle)
                             }
                         }
@@ -438,11 +442,10 @@ impl<T: Data> Widget<T> for WindowWidget<T> {
                         use raw_window_handle_6::*;
                         impl HasWindowHandle for WinHandle {
                             fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-                                let mut handle = Win32WindowHandle::new(
-                                    NonZeroIsize::new(self.handle as _).unwrap(),
-                                );
-                                handle.hinstance =
-                                    Some(NonZeroIsize::new(self.instance as _).unwrap());
+                                let hwnd = NonZeroIsize::new(self.handle.0 as isize)
+                                    .ok_or(HandleError::Unavailable)?;
+                                let mut handle = Win32WindowHandle::new(hwnd);
+                                handle.hinstance = NonZeroIsize::new(self.instance.0 as isize);
                                 Ok(unsafe {
                                     raw_window_handle_6::WindowHandle::borrow_raw(
                                         raw_window_handle_6::RawWindowHandle::Win32(handle),
@@ -453,15 +456,15 @@ impl<T: Data> Widget<T> for WindowWidget<T> {
                     }
                     let _ = window_shadows::set_shadow(
                         WinHandle {
-                            handle: handle.hwnd as _,
-                            instance: handle.hinstance as _,
+                            handle: HWND(handle.hwnd),
+                            instance: HINSTANCE(handle.hinstance),
                         },
                         true,
                     );
                     let _ = window_vibrancy::apply_acrylic(
                         WinHandle {
-                            handle: handle.hwnd as _,
-                            instance: handle.hinstance as _,
+                            handle: HWND(handle.hwnd),
+                            instance: HINSTANCE(handle.hinstance),
                         },
                         None,
                     );

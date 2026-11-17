@@ -39,6 +39,7 @@ extern "system" {
         h_template_file: Handle,
     ) -> Handle;
     fn GetConsoleMode(h_console_handle: Handle, lp_mode: *mut u32) -> i32;
+    fn SetConsoleMode(h_console_handle: Handle, dw_mode: u32) -> i32;
     fn GetConsoleOutputCP() -> u32;
 }
 
@@ -78,8 +79,15 @@ pub fn attach_parent_console() -> Option<ConsoleInfo> {
         }
 
         let mut mode = 0u32;
-        if GetConsoleMode(GetStdHandle(STD_ERROR_HANDLE), &mut mode) == 0 {
+        let console_handle = GetStdHandle(STD_ERROR_HANDLE);
+        if GetConsoleMode(console_handle, &mut mode) == 0 {
             mode = 0;
+        } else if mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0
+            && SetConsoleMode(console_handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+        {
+            // Windows 10 1511+ 的控制台默认不一定开启 VT 序列；开启后
+            // tracing 的 ANSI 颜色才能生效。失败时保持原模式并按无色输出。
+            mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
         }
         Some(ConsoleInfo {
             mode,

@@ -230,90 +230,105 @@ pub fn search_for_java() -> Vec<String> {
     #[cfg(windows)]
     {
         let mut result = Vec::with_capacity(16);
-        // 从注册表中搜索 JavaHome
-        use winreg::{enums::*, *};
-        fn search_local_machine_reg_value(key: &str, result: &mut Vec<String>) {
-            let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-            if let Ok(subkey) = hklm
-                .open_subkey("SOFTWARE\\JavaSoft")
-                .and_then(|subkey| subkey.open_subkey(key))
-            {
-                for s in subkey.enum_keys().flatten() {
-                    let subkey = subkey.open_subkey(s);
-                    if let Ok(subkey) = subkey {
-                        if let Ok(v) = subkey.get_value("JavaHome") {
-                            result.push(v);
-                        }
-                    }
+        use winreg::{enums::*, RegKey, HKEY};
+
+        /// 读取 JavaSoft / Eclipse Adoptium 风格键下所有版本的 `JavaHome`。
+        fn collect_java_homes(key: &RegKey, flags: u32, result: &mut Vec<String>) {
+            for version in key.enum_keys().flatten() {
+                let Ok(version_key) = key.open_subkey_with_flags(&version, KEY_READ | flags) else {
+                    continue;
+                };
+                let Ok(home) = version_key.get_value::<String, _>("JavaHome") else {
+                    continue;
+                };
+                // 个别安装器会把 JavaHome 写成带引号或尾随分隔符的字符串。
+                let home = home.trim_matches(['"', '\0']).trim_end_matches(['\\', '/']);
+                if !home.is_empty() {
+                    result.push(home.to_owned());
                 }
             }
         }
-        search_local_machine_reg_value("Java Runtime Environment", &mut result);
-        search_local_machine_reg_value("Java Development Kit", &mut result);
-        search_local_machine_reg_value("JRE", &mut result);
-        search_local_machine_reg_value("JDK", &mut result);
-        fn list_java_directory(path: &str, result: &mut Vec<String>) {
-            let mut path = std::path::PathBuf::from(path);
-            path.push("Java");
-            check_bin_java_directory(&path, result);
-            path.pop();
-            path.push("BellSoft");
-            check_bin_java_directory(&path, result);
-            path.pop();
-            path.push("AdoptOpenJDK");
-            check_bin_java_directory(&path, result);
-            path.pop();
-            path.push("Zulu");
-            check_bin_java_directory(&path, result);
-            path.pop();
-            path.push("Microsoft");
-            check_bin_java_directory(&path, result);
-            path.pop();
-            path.push("Eclipse Foundation");
-            check_bin_java_directory(&path, result);
-            path.pop();
-            path.push("Semeru");
-            check_bin_java_directory(&path, result);
-            path.pop();
+
+        /// 同时搜索 64 位与 32 位注册表视图。
+        ///
+        /// 64 位启动器进程默认只能看到 64 位视图，而老版本 Minecraft 经常
+        /// 依赖 32 位 Java；不显式打开 KEY_WOW64_32KEY 会漏掉这些运行时。
+        fn search_java_registry(root: HKEY, flags: u32, result: &mut Vec<String>) {
+            let root = RegKey::predef(root);
+            for base in [
+                "SOFTWARE\\JavaSoft",
+                "SOFTWARE\\Eclipse Adoptium",
+                "SOFTWARE\\Eclipse Foundation",
+            ] {
+                let Ok(base_key) = root.open_subkey_with_flags(base, KEY_READ | flags) else {
+                    continue;
+                };
+                for product in [
+                    "Java Runtime Environment",
+                    "Java Development Kit",
+                    "JRE",
+                    "JDK",
+                ] {
+                    let Ok(product_key) =
+                        base_key.open_subkey_with_flags(product, KEY_READ | flags)
+                    else {
+                        continue;
+                    };
+                    collect_java_homes(&product_key, flags, result);
+                }
+            }
         }
-        if let Ok(program_files) = std::env::var("ProgramFiles")
-            .or_else::<std::env::VarError, _>(|_| Ok("C:\\Program Files".into()))
-        {
+
+        for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+            for flags in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+                search_java_registry(root, flags, &mut result);
+            }
+        }
+
+        fn list_java_directory(root: &Path, result: &mut Vec<String>) {
+            for vendor in [
+                "Java",
+                "BellSoft",
+                "AdoptOpenJDK",
+                "Zulu",
+                "Microsoft",
+                "Eclipse Foundation",
+                "Semeru",
+            ] {
+                check_bin_java_directory(root.join(vendor), result);
+            }
+        }
+
+        // 常见 JDK 安装目录，同时扫描官方启动器随游戏下载的运行时。
+        for var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramFiles(ARM)"] {
+            let Some(program_files) = std::env::var_os(var) else {
+                continue;
+            };
+            let program_files = PathBuf::from(program_files);
             list_java_directory(&program_files, &mut result);
+            let runtime_root = program_files.join("Minecraft Launcher").join("runtime");
+            for dir in minecraft_launcher_runtime_dirs(&runtime_root) {
+                check_java(&dir, &mut result);
+            }
         }
-        if let Ok(program_files) = std::env::var("ProgramFiles(x86)")
-            .or_else::<std::env::VarError, _>(|_| Ok("C:\\Program Files (x86)".into()))
-        {
-            list_java_directory(&program_files, &mut result);
-            let mut minecraft_launcher_dir = PathBuf::from(program_files);
-            minecraft_launcher_dir
-                .push("Minecraft Launcher\\runtime\\jre-legacy\\windows-x64\\jre-legacy\\bin");
-            check_java(&minecraft_launcher_dir, &mut result);
-            minecraft_launcher_dir.pop();
-            minecraft_launcher_dir.pop();
-            minecraft_launcher_dir.pop();
-            minecraft_launcher_dir.push("windows-x86\\jre-legacy\\bin");
-            check_java(&minecraft_launcher_dir, &mut result);
-            minecraft_launcher_dir.pop();
-            minecraft_launcher_dir.pop();
-            minecraft_launcher_dir.pop();
-            minecraft_launcher_dir.pop();
-            minecraft_launcher_dir.push("java-runtime-alpha\\windows-x64\\java-runtime-alpha\\bin");
-            check_java(&minecraft_launcher_dir, &mut result);
-            minecraft_launcher_dir.pop();
-            minecraft_launcher_dir.pop();
-            minecraft_launcher_dir.pop();
-            minecraft_launcher_dir.push("windows-x86\\java-runtime-alpha\\bin");
-            check_java(&minecraft_launcher_dir, &mut result);
+
+        // Microsoft Store 版 Minecraft Launcher 的运行时位于包私有目录。
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let runtime_root = PathBuf::from(local_app_data)
+                .join("Packages")
+                .join("Microsoft.4297127D64EC6_8wekyb3d8bbwe")
+                .join("LocalCache")
+                .join("Local")
+                .join("runtime");
+            for dir in minecraft_launcher_runtime_dirs(&runtime_root) {
+                check_java(&dir, &mut result);
+            }
         }
-        if let Ok(program_files) = std::env::var("ProgramFiles(ARM)")
-            .or_else::<std::env::VarError, _>(|_| Ok("C:\\Program Files (ARM)".into()))
-        {
-            list_java_directory(&program_files, &mut result);
-        }
-        // 从环境变量中查询 java.exe
-        if let Ok(paths) = std::env::var("PATH") {
-            for path in paths.split(';') {
+
+        // 从环境变量中查询 java.exe。Windows 的 PATH 可能包含带引号的
+        // 路径，交给 split_paths 处理，不能直接按 ';' 切分。
+        if let Some(paths) = std::env::var_os("PATH") {
+            for path in std::env::split_paths(&paths) {
                 check_java(path, &mut result);
             }
         }
@@ -326,33 +341,22 @@ pub fn search_for_java() -> Vec<String> {
         let mut result: Vec<_> = result
             .into_iter()
             .map(|mut a| {
-                #[cfg(windows)]
+                if !a.ends_with("java.exe")
+                    && !a.ends_with("javaw.exe")
+                    && !a.ends_with("java")
+                    && !a.ends_with("javaw")
                 {
-                    if !a.ends_with("java.exe")
-                        && !a.ends_with("javaw.exe")
-                        && !a.ends_with("java")
-                        && !a.ends_with("javaw")
-                    {
-                        if !a.ends_with('\\') && !a.ends_with('/') {
-                            a.push('\\');
-                        }
-                        a.push_str("bin\\java.exe");
+                    if !a.ends_with('\\') && !a.ends_with('/') {
+                        a.push('\\');
                     }
-                }
-                #[cfg(not(windows))]
-                {
-                    if !a.ends_with("java") {
-                        if !a.ends_with('/') {
-                            a.push('/');
-                        }
-                        a.push_str("bin/java");
-                    }
+                    a.push_str("bin\\java.exe");
                 }
                 a
             })
             .collect();
-        result.sort();
-        result.dedup();
+        // Windows 路径不区分大小写，按小写键排序并去重。
+        result.sort_by_key(|path| path.to_ascii_lowercase());
+        result.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         result
     }
     #[cfg(target_os = "linux")]
@@ -405,6 +409,39 @@ pub fn search_for_java() -> Vec<String> {
     }
 }
 
+/// 官方启动器内置 Java 运行时的目录布局。
+///
+/// 布局为 `runtime/<组件>/<windows-arch>/<组件>/bin`，`runtime_root` 是
+/// `runtime` 目录本身。旧实现连续 `pop` 拼路径时会把 `java-runtime-alpha`
+/// 拼到 `runtime/jre-legacy` 下面，导致随官方启动器下载的现代 Java 永远
+/// 扫描不到。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn minecraft_launcher_runtime_dirs(runtime_root: &Path) -> Vec<PathBuf> {
+    const COMPONENTS: &[&str] = &[
+        "jre-legacy",
+        "java-runtime-alpha",
+        "java-runtime-beta",
+        "java-runtime-gamma",
+        "java-runtime-delta",
+        "java-runtime-epsilon",
+    ];
+    const ARCHES: &[&str] = &["windows-x64", "windows-x86", "windows-arm64"];
+
+    let mut dirs = Vec::with_capacity(COMPONENTS.len() * ARCHES.len());
+    for component in COMPONENTS {
+        for arch in ARCHES {
+            dirs.push(
+                runtime_root
+                    .join(component)
+                    .join(arch)
+                    .join(component)
+                    .join("bin"),
+            );
+        }
+    }
+    dirs
+}
+
 /// 根据 Java 的输出裁剪出版本号文本
 fn query_java_version(java_output: &str) -> &str {
     fn parser(input: &str) -> nom::IResult<&str, &str> {
@@ -419,5 +456,33 @@ fn query_java_version(java_output: &str) -> &str {
         }
     } else {
         ""
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::minecraft_launcher_runtime_dirs;
+
+    #[test]
+    fn launcher_runtime_layout_keeps_component_at_each_level() {
+        let dirs = minecraft_launcher_runtime_dirs(Path::new(r"C:\Minecraft Launcher\runtime"));
+
+        assert!(dirs
+            .iter()
+            .any(|p| p.ends_with("jre-legacy/windows-x64/jre-legacy/bin")));
+        assert!(dirs
+            .iter()
+            .any(|p| p.ends_with("java-runtime-gamma/windows-x64/java-runtime-gamma/bin")));
+        assert!(dirs
+            .iter()
+            .any(|p| p.ends_with("java-runtime-epsilon/windows-arm64/java-runtime-epsilon/bin")));
+
+        // 旧实现会把现代运行时拼到 runtime/jre-legacy 下面。
+        assert!(!dirs.iter().any(|p| {
+            let text = p.to_string_lossy();
+            text.contains("jre-legacy") && text.contains("java-runtime-alpha")
+        }));
     }
 }

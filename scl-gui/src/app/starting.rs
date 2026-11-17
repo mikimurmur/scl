@@ -92,28 +92,25 @@ pub fn official_window_title_allows(title: &str) -> bool {
 mod win_window_scan {
     use std::collections::HashSet;
 
+    use windows::{
+        core::BOOL,
+        Win32::{
+            Foundation::{CloseHandle, HWND, LPARAM, WAIT_OBJECT_0},
+            System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+            UI::WindowsAndMessaging::{
+                EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId,
+                IsWindowVisible, ShowWindow, SW_HIDE,
+            },
+        },
+    };
+
     use super::{official_window_class_matches, official_window_title_allows};
 
     type Hwnd = isize;
 
-    #[link(name = "user32")]
-    extern "system" {
-        fn EnumWindows(
-            lp_enum_fn: unsafe extern "system" fn(Hwnd, isize) -> i32,
-            l_param: isize,
-        ) -> i32;
-        fn GetClassNameW(hwnd: Hwnd, lp_class_name: *mut u16, n_max_count: i32) -> i32;
-        fn GetWindowTextW(hwnd: Hwnd, lp_string: *mut u16, n_max_count: i32) -> i32;
-        fn IsWindowVisible(hwnd: Hwnd) -> i32;
-        fn ShowWindow(hwnd: Hwnd, n_cmd_show: i32) -> i32;
-    }
-
-    const LAUNCHER_WINDOW_CLASS: &str = "Sharp Craft Launcher";
-    const SW_HIDE: i32 = 0;
-
     unsafe fn window_class_name(hwnd: Hwnd) -> String {
         let mut buffer = [0u16; 512];
-        let len = GetClassNameW(hwnd, buffer.as_mut_ptr(), 512);
+        let len = GetClassNameW(HWND(hwnd as _), &mut buffer);
         if len <= 0 {
             return String::new();
         }
@@ -122,72 +119,123 @@ mod win_window_scan {
 
     unsafe fn window_text(hwnd: Hwnd) -> String {
         let mut buffer = [0u16; 512];
-        let len = GetWindowTextW(hwnd, buffer.as_mut_ptr(), 512);
+        let len = GetWindowTextW(HWND(hwnd as _), &mut buffer);
         if len <= 0 {
             return String::new();
         }
         String::from_utf16_lossy(&buffer[..len as usize])
     }
 
+    fn window_process_id(hwnd: Hwnd) -> u32 {
+        let mut pid = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(HWND(hwnd as _), Some(&mut pid as *mut u32));
+        }
+        pid
+    }
+
     /// 官方回调：先判类名，未命中直接跳过（不查询标题）；
-    unsafe extern "system" fn scan_callback(hwnd: Hwnd, l_param: isize) -> i32 {
-        let found = &mut *(l_param as *mut HashSet<Hwnd>);
+    unsafe extern "system" fn scan_callback(hwnd: HWND, l_param: LPARAM) -> BOOL {
+        let found = &mut *(l_param.0 as *mut HashSet<Hwnd>);
+        let hwnd = hwnd.0 as isize;
         let class_name = window_class_name(hwnd);
         if !official_window_class_matches(&class_name) {
-            return 1;
+            return BOOL(1);
         }
         let title = window_text(hwnd);
         if official_window_title_allows(&title) {
             found.insert(hwnd);
         }
-        1
-    }
-
-    unsafe extern "system" fn hide_callback(hwnd: Hwnd, l_param: isize) -> i32 {
-        let target = &mut *(l_param as *mut Hwnd);
-        if *target != 0 {
-            return 0;
-        }
-        if IsWindowVisible(hwnd) == 0 {
-            return 1;
-        }
-        if window_class_name(hwnd) == LAUNCHER_WINDOW_CLASS
-            || window_text(hwnd) == LAUNCHER_WINDOW_CLASS
-        {
-            *target = hwnd;
-            return 0;
-        }
-        1
+        BOOL(1)
     }
 
     /// 单轮扫描：收集当前所有符合官方判定条件的顶层窗口句柄。
     pub fn scan_game_windows() -> HashSet<Hwnd> {
         let mut found = HashSet::new();
         unsafe {
-            EnumWindows(scan_callback, &mut found as *mut _ as isize);
+            let _ = EnumWindows(Some(scan_callback), LPARAM(&mut found as *mut _ as isize));
         }
         found
     }
 
     pub fn is_window_visible(hwnd: Hwnd) -> bool {
-        unsafe { IsWindowVisible(hwnd) != 0 }
+        unsafe { IsWindowVisible(HWND(hwnd as _)).as_bool() }
     }
 
-    pub fn hide_launcher_window() {
+    /// 窗口已经创建但 GLFW 可能还没显示；给最多 30 秒的可见性观察窗口。
+    /// 超时后仍视为启动完成（与原实现一致）。
+    fn wait_until_visible(windows: &[Hwnd]) -> bool {
+        for _ in 0..150 {
+            if windows.iter().any(|&hwnd| is_window_visible(hwnd)) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        true
+    }
+
+    /// 目标进程是否已经退出。OpenProcess 失败时按仍存活处理，
+    /// 避免权限问题导致等待线程提前结束。
+    fn process_exited(pid: u32) -> bool {
         unsafe {
-            let mut hwnd: Hwnd = 0;
-            EnumWindows(hide_callback, &mut hwnd as *mut Hwnd as isize);
-            if hwnd != 0 {
-                ShowWindow(hwnd, SW_HIDE);
+            match OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+                Ok(handle) => {
+                    let exited = WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
+                    let _ = CloseHandle(handle);
+                    exited
+                }
+                Err(_) => false,
+            }
+        }
+    }
+
+    /// 等待游戏窗口出现。
+    ///
+    /// 优先用 `GetWindowThreadProcessId` 认领启动的游戏进程窗口；包装器
+    /// 或注入器把窗口创建在子进程时，再用启动前基线差分兜底。进程退出
+    /// 后返回 `false`，避免旧实现在崩溃后继续无限空转。
+    pub fn wait_for_game_window(pid: u32) -> bool {
+        let baseline = scan_game_windows();
+        loop {
+            let current = scan_game_windows();
+            let own: Vec<_> = current
+                .iter()
+                .copied()
+                .filter(|&hwnd| window_process_id(hwnd) == pid)
+                .collect();
+            if !own.is_empty() {
+                return wait_until_visible(&own);
+            }
+            let fresh: Vec<_> = current.difference(&baseline).copied().collect();
+            if !fresh.is_empty() {
+                return wait_until_visible(&fresh);
+            }
+            if process_exited(pid) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(64));
+        }
+    }
+
+    pub fn game_window_exists(pid: u32) -> bool {
+        scan_game_windows()
+            .iter()
+            .any(|&hwnd| window_process_id(hwnd) == pid)
+    }
+
+    pub fn hide_window(hwnd: Hwnd) {
+        if hwnd != 0 {
+            unsafe {
+                let _ = ShowWindow(HWND(hwnd as _), SW_HIDE);
             }
         }
     }
 }
 
-/// Windows：按窗口类/标题找到启动器自己的窗口并隐藏
+/// Windows：按原生窗口句柄隐藏启动器自己的窗口
 #[cfg(target_os = "windows")]
-pub fn hide_launcher_window() {
-    win_window_scan::hide_launcher_window();
+pub fn hide_launcher_window(hwnd: isize) {
+    win_window_scan::hide_window(hwnd);
 }
 
 /// Linux：通过 X11 窗口树扫描游戏窗口。
@@ -384,26 +432,8 @@ mod linux_window_scan {
 }
 
 #[cfg(target_os = "windows")]
-pub fn wait_for_game_window(_pid: u32) -> bool {
-    let baseline = win_window_scan::scan_game_windows();
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(64));
-        let current = win_window_scan::scan_game_windows();
-        let fresh: Vec<_> = current.difference(&baseline).copied().collect();
-        if fresh.is_empty() {
-            continue;
-        }
-        for _ in 0..150 {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            if fresh
-                .iter()
-                .any(|&hwnd| win_window_scan::is_window_visible(hwnd))
-            {
-                break;
-            }
-        }
-        return true;
-    }
+pub fn wait_for_game_window(pid: u32) -> bool {
+    win_window_scan::wait_for_game_window(pid)
 }
 
 /// 等待游戏窗口出现，最多等待 `timeout`
@@ -426,9 +456,8 @@ fn game_window_exists(pid: u32) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn game_window_exists(_pid: u32) -> bool {
-    // Windows 分支已有独立的基线差分等待逻辑，这里仅用于带超时的观察窗口。
-    !win_window_scan::scan_game_windows().is_empty()
+fn game_window_exists(pid: u32) -> bool {
+    win_window_scan::game_window_exists(pid)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]

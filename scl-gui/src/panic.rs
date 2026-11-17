@@ -253,7 +253,17 @@ fn copy_to_clipboard_windows(text: &str) {
     }
 
     unsafe {
-        if OpenClipboard(0) == 0 {
+        // 其它程序（尤其是 Office / 输入法）可能短暂占用剪切板，OpenClipboard
+        // 会直接失败。这里做有限重试，避免错误报告在用户点“是”之后静默丢失。
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(0) != 0 {
+                opened = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if !opened {
             tracing::warn!("打开剪切板失败，无法复制错误报告");
             return;
         }
@@ -261,7 +271,9 @@ fn copy_to_clipboard_windows(text: &str) {
         let wide = to_wide(text);
         let size = wide.len() * std::mem::size_of::<u16>();
         let handle = GlobalAlloc(GMEM_MOVEABLE, size);
-        if handle != 0 {
+        if handle == 0 {
+            tracing::warn!("为错误报告分配剪切板内存失败");
+        } else {
             let ptr = GlobalLock(handle) as *mut u16;
             if !ptr.is_null() {
                 std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());

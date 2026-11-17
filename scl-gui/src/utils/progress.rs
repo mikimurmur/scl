@@ -11,9 +11,11 @@ use std::{
 
 use druid::{ExtEventSink, Target};
 use scl_core::progress::{ReportState, Reporter};
+#[cfg(unix)]
+use scl_gui_widgets::widgets::{ADD_MAX_PROGRESS, ADD_PROGRESS};
 use scl_gui_widgets::widgets::{
-    ADD_MAX_PROGRESS, ADD_PROGRESS, HIDE_PROGRESS, NEW_PROGRESS, REMOVE_PROGRESS, SET_MAX_PROGRESS,
-    SET_MESSAGE, SET_PROGRESS, SET_SUB_MESSAGE,
+    HIDE_PROGRESS, NEW_PROGRESS, REMOVE_PROGRESS, SET_MAX_PROGRESS, SET_MESSAGE, SET_PROGRESS,
+    SET_SUB_MESSAGE,
 };
 
 /// 进度事件合并窗口

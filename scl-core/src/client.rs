@@ -1081,6 +1081,43 @@ mod tests {
     }
 
     #[test]
+    fn jar_field_puts_target_version_jar_on_classpath() {
+        let fixture = Fixture::new(
+            "jar-field",
+            r#"{
+                "mainClass": "net.minecraft.client.main.Main",
+                "jar": "test-base",
+                "arguments": { "game": [], "jvm": ["-cp", "${classpath}"] },
+                "libraries": []
+            }"#,
+        );
+        fixture.write_base_version(
+            "test-base",
+            r#"{"mainClass":"net.minecraft.client.main.Main"}"#,
+        );
+        let base_jar = Path::new(&fixture.version_base)
+            .join("test-base")
+            .join("test-base.jar");
+        fs_err::write(&base_jar, b"base jar").unwrap();
+
+        let client = Client::new(fixture.config(8)).unwrap();
+        let classpath = client
+            .args
+            .iter()
+            .position(|arg| arg == "-cp")
+            .map(|index| &client.args[index + 1])
+            .expect("启动参数里应有 -cp");
+        assert!(
+            classpath.contains("test-base.jar"),
+            "jar 字段指向的版本 JAR 应进入 classpath：{classpath}"
+        );
+        assert!(
+            !classpath.contains(&format!("{}.jar", fixture.version_name)),
+            "当前版本没有 JAR 时不应凭空加入自己的路径：{classpath}"
+        );
+    }
+
+    #[test]
     fn inherited_java_version_gates_loader_versions() {
         // NeoForge 等加载器的版本 JSON 往往没有 javaVersion，要求来自被继承的原版元数据
         let fixture = Fixture::new(

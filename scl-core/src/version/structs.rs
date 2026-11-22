@@ -289,9 +289,20 @@ pub struct VersionMeta {
     #[serde(rename = "inheritsFrom")]
     pub inherits_from: String,
     /// 1.12 以前的继承版本
+    ///
+    /// 这是部分第三方启动器使用的“客户端版本”提示，不是 `inheritsFrom`：
+    /// 它只说明应该使用哪个版本的游戏 JAR / 最低 Java 版本，不应据此合并父
+    /// 版本的依赖库和启动参数。
     #[serde(default)]
     #[serde(rename = "clientVersion")]
     pub client_version: String,
+    /// 指定使用哪个版本的客户端 JAR
+    ///
+    /// 为空时使用当前版本目录下的 `<版本>.jar`；非空时优先使用
+    /// `versions/<jar>/<jar>.jar`，用于兼容 HMCL 等启动器的胖 JSON。
+    #[serde(default)]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub jar: String,
     #[serde(default)]
     #[serde(rename = "javaVersion")]
     /// 新版本的 Java 版本元数据
@@ -324,6 +335,13 @@ pub struct VersionMeta {
     /// 该版本元数据的主类列表，因为有可能存在多个主类 JAR
     #[serde(skip)]
     pub main_jars: Vec<String>,
+    /// 未被 SCL 识别的版本元数据字段
+    ///
+    /// 保存版本设置时会原样写回，避免把其它启动器写入的 `id`、`patches`、
+    /// `compatibilityRules` 等字段丢掉。
+    #[serde(flatten)]
+    #[serde(default)]
+    pub extra: Map<String, serde_json::Value>,
 }
 
 impl VersionMeta {
@@ -385,6 +403,14 @@ impl VersionMeta {
             } else {
                 8
             }
+        } else if !self.client_version.is_empty() {
+            // `clientVersion` 不是继承关系，但可以作为“这是哪个原版版本”的
+            // 提示，用于没有 assetIndex / inheritsFrom 的第三方胖 JSON。
+            if let Ok((_, ver)) = crate::semver::parse_version(&self.client_version) {
+                ver.required_java_version()
+            } else {
+                8
+            }
         } else {
             8
         }
@@ -396,7 +422,11 @@ impl std::ops::AddAssign for VersionMeta {
         self.main_class = data.main_class.to_owned();
         self.minecraft_arguments = data.minecraft_arguments;
         self.libraries.extend_from_slice(&data.libraries);
-        self.main_jars.extend_from_slice(&data.main_jars);
+        // 子版本有自己的主 JAR（或通过 `jar` 指向别的版本）时，应覆盖父版本
+        // 的主 JAR，而不是把两个都塞进 classpath。
+        if !data.main_jars.is_empty() {
+            self.main_jars = data.main_jars;
+        }
         if let Some(downloads) = &mut data.downloads.to_owned() {
             if let Some(self_downloads) = &mut self.downloads {
                 self_downloads.append(downloads);
@@ -419,6 +449,13 @@ impl std::ops::AddAssign for VersionMeta {
         if let Some(logging) = &data.logging {
             self.logging = Some(logging.to_owned());
         }
+        if !data.client_version.is_empty() {
+            self.client_version = data.client_version;
+        }
+        if !data.jar.is_empty() {
+            self.jar = data.jar;
+        }
+        self.extra.extend(data.extra);
     }
 }
 
@@ -449,10 +486,11 @@ pub struct VersionInfo {
     pub required_java_from_metadata: bool,
 }
 
-/// 沿 `inheritsFrom` / `clientVersion` 查找继承链里显式的 `javaVersion`。
+/// 沿 `inheritsFrom` 查找继承链里显式的 `javaVersion`。
 ///
 /// 返回 `(要求的主版本, 是否来自显式元数据)`。找不到显式要求时回退到
-/// [`VersionMeta::required_java_version`] 的版本号启发式。
+/// [`VersionMeta::required_java_version`] 的版本号启发式；`clientVersion`
+/// 只作为版本号提示，不参与继承链。
 fn resolve_required_java(version_base: &Path, meta: &VersionMeta) -> (u8, bool) {
     fn explicit_requirement(version_base: &Path, meta: &VersionMeta, depth: u8) -> Option<u8> {
         if let Some(java) = &meta.java_version {
@@ -463,8 +501,6 @@ fn resolve_required_java(version_base: &Path, meta: &VersionMeta) -> (u8, bool) 
         }
         let parent_name = if !meta.inherits_from.is_empty() {
             meta.inherits_from.as_str()
-        } else if !meta.client_version.is_empty() {
-            meta.client_version.as_str()
         } else {
             return None;
         };
@@ -487,9 +523,6 @@ impl VersionInfo {
     pub fn load(&mut self) -> DynResult {
         let version_base_path = Path::new(&self.version_base);
         if version_base_path.is_dir() {
-            let jar_path = version_base_path
-                .join(&self.version)
-                .join(format!("{}.jar", self.version));
             let meta_path = version_base_path
                 .join(&self.version)
                 .join(format!("{}.json", self.version));
@@ -511,8 +544,27 @@ impl VersionInfo {
                 let data = fs_err::read_to_string(meta_path)?;
                 let mut meta: VersionMeta =
                     serde_json::from_str(data.trim_start_matches('\u{feff}'))?; // 去掉可能存在的 BOM
-                if jar_path.is_file() {
-                    meta.main_jars.push(get_full_path(jar_path));
+
+                // `jar` 指向另一个版本时，优先使用那个版本的客户端 JAR；目标
+                // JAR 不存在时再退回当前版本自己的 JAR。HMCL 等启动器会把
+                // 整合包的 `jar` 指向前置版本，而版本目录里不一定有 JAR。
+                let main_jar_name = if meta.jar.is_empty() {
+                    self.version.clone()
+                } else {
+                    meta.jar.clone()
+                };
+                let main_jar_path = version_base_path
+                    .join(&main_jar_name)
+                    .join(format!("{main_jar_name}.jar"));
+                if main_jar_path.is_file() {
+                    meta.main_jars.push(get_full_path(main_jar_path));
+                } else if main_jar_name != self.version {
+                    let own_jar_path = version_base_path
+                        .join(&self.version)
+                        .join(format!("{}.jar", self.version));
+                    if own_jar_path.is_file() {
+                        meta.main_jars.push(get_full_path(own_jar_path));
+                    }
                 }
                 let (required_java, required_java_from_metadata) =
                     resolve_required_java(version_base_path, &meta);
@@ -524,6 +576,10 @@ impl VersionInfo {
                     }
                 } else if !meta.inherits_from.is_empty() {
                     if let Ok((_, ver)) = crate::semver::parse_version(&meta.inherits_from) {
+                        self.minecraft_version = ver;
+                    }
+                } else if !meta.client_version.is_empty() {
+                    if let Ok((_, ver)) = crate::semver::parse_version(&meta.client_version) {
                         self.minecraft_version = ver;
                     }
                 }
@@ -538,14 +594,13 @@ impl VersionInfo {
 
     /// 返回合并继承链后的版本元数据
     ///
-    /// 若当前元数据包含 `inheritsFrom` 或 `clientVersion`，会读取父版本 JSON
-    /// 并把当前元数据覆盖到父元数据上；父版本不可用时返回当前元数据本身。
+    /// 只有 `inheritsFrom` 表示元数据继承；`clientVersion` 是第三方启动器
+    /// 的客户端版本提示，不会触发父版本合并。父版本不可用时返回当前元数据
+    /// 本身。
     pub fn merged_meta(&self) -> Option<VersionMeta> {
         let meta = self.meta.as_ref()?;
         let inherits_from = if !meta.inherits_from.is_empty() {
             meta.inherits_from.as_str()
-        } else if !meta.client_version.is_empty() && self.version != meta.client_version {
-            meta.client_version.as_str()
         } else {
             ""
         };
@@ -583,6 +638,7 @@ impl VersionInfo {
     pub fn rename_version(&mut self, new_version_name: &str) -> DynResult {
         let version_base_path = Path::new(&self.version_base);
         if version_base_path.is_dir() {
+            let old_version_name = self.version.clone();
             let version_path = version_base_path.join(&self.version);
             let version_jar_path = version_path.join(format!("{}.jar", self.version));
             let version_json_path = version_path.join(format!("{}.json", self.version));
@@ -599,6 +655,19 @@ impl VersionInfo {
                     fs_err::rename(version_json_path, new_version_json_path)?
                 };
                 fs_err::rename(version_path, new_version_path)?;
+                if let Some(meta) = &mut self.meta {
+                    if meta.jar == old_version_name {
+                        meta.jar = new_version_name.to_owned();
+                    }
+                    if meta.extra.get("id").and_then(|id| id.as_str())
+                        == Some(old_version_name.as_str())
+                    {
+                        meta.extra.insert(
+                            "id".to_owned(),
+                            serde_json::Value::String(new_version_name.to_owned()),
+                        );
+                    }
+                }
                 self.version = new_version_name.to_owned();
                 Ok(())
             }
@@ -886,7 +955,7 @@ where
 mod tests {
     use std::path::Path;
 
-    use super::VersionInfo;
+    use super::{Argument, VersionInfo};
 
     fn write_version(versions: &Path, name: &str, json: &str) {
         let dir = versions.join(name);
@@ -952,6 +1021,242 @@ mod tests {
             !info.required_java_from_metadata,
             "没有显式 javaVersion 时仍走 8+/16+ 启发式"
         );
+
+        let _ = fs_err::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn client_version_does_not_merge_parent_metadata() {
+        let dir = std::env::temp_dir().join(format!(
+            "scl_client_version_{}_{}",
+            std::process::id(),
+            "no_merge"
+        ));
+        let _ = fs_err::remove_dir_all(&dir);
+        let versions = dir.join("versions");
+        write_version(
+            &versions,
+            "base",
+            r#"{
+                "mainClass":"net.minecraft.client.main.Main",
+                "assetIndex":{"id":"1.21.1","sha1":"","size":0,"totalSize":0,"url":""},
+                "arguments":{"game":["--base"],"jvm":[]},
+                "libraries":[{"name":"org.example:base:1.0"}]
+            }"#,
+        );
+        write_version(
+            &versions,
+            "fat",
+            r#"{
+                "mainClass":"net.minecraft.client.main.Main",
+                "clientVersion":"base",
+                "assetIndex":{"id":"1.21.1","sha1":"","size":0,"totalSize":0,"url":""},
+                "arguments":{"game":["--fat"],"jvm":[]},
+                "libraries":[{"name":"org.example:fat:1.0"}]
+            }"#,
+        );
+
+        let mut info = VersionInfo {
+            version_base: versions.to_string_lossy().to_string(),
+            version: "fat".into(),
+            ..Default::default()
+        };
+        info.load().expect("加载版本元数据");
+        let merged = info.merged_meta().expect("合并版本元数据");
+        assert_eq!(
+            merged.libraries.len(),
+            1,
+            "clientVersion 不应触发父版本合并"
+        );
+        assert_eq!(merged.libraries[0].name, "org.example:fat:1.0");
+        let game = merged.arguments.expect("游戏参数").game;
+        assert_eq!(game.len(), 1);
+        assert!(matches!(&game[0], Argument::Common(value) if value == "--fat"));
+
+        let _ = fs_err::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn client_version_is_used_as_java_hint() {
+        let dir = std::env::temp_dir().join(format!(
+            "scl_client_version_{}_{}",
+            std::process::id(),
+            "java_hint"
+        ));
+        let _ = fs_err::remove_dir_all(&dir);
+        let versions = dir.join("versions");
+        write_version(
+            &versions,
+            "fat",
+            r#"{"mainClass":"net.minecraft.client.main.Main","clientVersion":"1.21.1"}"#,
+        );
+
+        let mut info = VersionInfo {
+            version_base: versions.to_string_lossy().to_string(),
+            version: "fat".into(),
+            ..Default::default()
+        };
+        info.load().expect("加载版本元数据");
+        assert_eq!(info.required_java, 21, "clientVersion 可作为 Java 版本提示");
+        assert!(
+            !info.required_java_from_metadata,
+            "clientVersion 只是启发式提示，不是显式 javaVersion"
+        );
+
+        let _ = fs_err::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn jar_field_uses_target_version_jar() {
+        let dir =
+            std::env::temp_dir().join(format!("scl_jar_field_{}_{}", std::process::id(), "target"));
+        let _ = fs_err::remove_dir_all(&dir);
+        let versions = dir.join("versions");
+        write_version(
+            &versions,
+            "base",
+            r#"{"mainClass":"net.minecraft.client.main.Main"}"#,
+        );
+        let base_jar = versions.join("base").join("base.jar");
+        fs_err::write(&base_jar, b"jar").expect("写入目标 JAR");
+        write_version(
+            &versions,
+            "fat",
+            r#"{"mainClass":"net.minecraft.client.main.Main","jar":"base"}"#,
+        );
+
+        let mut info = VersionInfo {
+            version_base: versions.to_string_lossy().to_string(),
+            version: "fat".into(),
+            ..Default::default()
+        };
+        info.load().expect("加载版本元数据");
+        let main_jars = &info.meta.expect("版本元数据").main_jars;
+        assert_eq!(
+            main_jars,
+            &[crate::utils::get_full_path(&base_jar)],
+            "应使用 jar 字段指向的版本 JAR"
+        );
+
+        let _ = fs_err::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inherited_jar_field_overrides_parent_main_jar() {
+        let dir = std::env::temp_dir().join(format!(
+            "scl_jar_field_{}_{}",
+            std::process::id(),
+            "inherited"
+        ));
+        let _ = fs_err::remove_dir_all(&dir);
+        let versions = dir.join("versions");
+        write_version(
+            &versions,
+            "base",
+            r#"{"mainClass":"net.minecraft.client.main.Main"}"#,
+        );
+        write_version(
+            &versions,
+            "target",
+            r#"{"mainClass":"net.minecraft.client.main.Main"}"#,
+        );
+        write_version(
+            &versions,
+            "child",
+            r#"{"mainClass":"net.minecraft.client.main.Main","inheritsFrom":"base","jar":"target"}"#,
+        );
+        let base_jar = versions.join("base").join("base.jar");
+        let target_jar = versions.join("target").join("target.jar");
+        fs_err::write(&base_jar, b"base").expect("写入父版本 JAR");
+        fs_err::write(&target_jar, b"target").expect("写入目标 JAR");
+
+        let mut info = VersionInfo {
+            version_base: versions.to_string_lossy().to_string(),
+            version: "child".into(),
+            ..Default::default()
+        };
+        info.load().expect("加载版本元数据");
+        let merged = info.merged_meta().expect("合并版本元数据");
+        assert_eq!(
+            merged.main_jars,
+            vec![crate::utils::get_full_path(&target_jar)],
+            "子版本 jar 字段应覆盖父版本的主 JAR"
+        );
+
+        let _ = fs_err::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_preserves_unknown_version_fields() {
+        let dir = std::env::temp_dir().join(format!(
+            "scl_preserve_json_{}_{}",
+            std::process::id(),
+            "unknown"
+        ));
+        let _ = fs_err::remove_dir_all(&dir);
+        let versions = dir.join("versions");
+        write_version(
+            &versions,
+            "fat",
+            r#"{
+                "id":"fat",
+                "mainClass":"net.minecraft.client.main.Main",
+                "type":"release",
+                "patches":[{"id":"game"}],
+                "customField":{"value":1},
+                "jar":"fat",
+                "libraries":[]
+            }"#,
+        );
+
+        let mut info = VersionInfo {
+            version_base: versions.to_string_lossy().to_string(),
+            version: "fat".into(),
+            ..Default::default()
+        };
+        info.load().expect("加载版本元数据");
+        info.save().expect("保存版本元数据");
+
+        let saved: serde_json::Value = serde_json::from_str(
+            &fs_err::read_to_string(versions.join("fat").join("fat.json"))
+                .expect("读取保存后的 JSON"),
+        )
+        .expect("解析保存后的 JSON");
+        assert_eq!(saved["id"], "fat");
+        assert_eq!(saved["type"], "release");
+        assert_eq!(saved["patches"][0]["id"], "game");
+        assert_eq!(saved["customField"]["value"], 1);
+        assert_eq!(saved["jar"], "fat");
+
+        let _ = fs_err::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_updates_self_jar_and_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "scl_rename_json_{}_{}",
+            std::process::id(),
+            "jar_id"
+        ));
+        let _ = fs_err::remove_dir_all(&dir);
+        let versions = dir.join("versions");
+        write_version(
+            &versions,
+            "old",
+            r#"{"id":"old","mainClass":"net.minecraft.client.main.Main","jar":"old"}"#,
+        );
+
+        let mut info = VersionInfo {
+            version_base: versions.to_string_lossy().to_string(),
+            version: "old".into(),
+            ..Default::default()
+        };
+        info.load().expect("加载版本元数据");
+        info.rename_version("new").expect("重命名版本");
+        let meta = info.meta.expect("版本元数据");
+        assert_eq!(meta.jar, "new");
+        assert_eq!(meta.extra["id"], "new");
+        assert!(versions.join("new").join("new.json").is_file());
 
         let _ = fs_err::remove_dir_all(&dir);
     }

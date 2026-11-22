@@ -130,16 +130,13 @@ fn fix_version_dir<R: Reporter>(
             return Ok(fixed);
         }
     };
-    // 带 inheritsFrom/clientVersion 的模组版本自身没有 downloads/assetIndex，
-    // 必须先把父版本元数据合并进来再校验补全；只处理父版本会把加载器自身
-    // 的依赖库整批漏掉（表现为「补全/修复版本文件」对模组版本毫无动作）。
-    let parent_name = if !meta.inherits_from.is_empty() {
-        meta.inherits_from.to_owned()
-    } else if !meta.client_version.is_empty() && meta.client_version != name {
-        meta.client_version.to_owned()
-    } else {
-        String::new()
-    };
+    // 带 inheritsFrom 的模组版本自身没有 downloads/assetIndex，必须先把父
+    // 版本元数据合并进来再校验补全；只处理父版本会把加载器自身的依赖库整批
+    // 漏掉（表现为「补全/修复版本文件」对模组版本毫无动作）。
+    //
+    // clientVersion 不是继承关系，只是部分第三方 JSON 的客户端版本提示，
+    // 不能用来合并父版本。
+    let parent_name = meta.inherits_from.to_owned();
     if !parent_name.is_empty() {
         let parent_json = path
             .parent()
@@ -173,7 +170,21 @@ fn fix_version_dir<R: Reporter>(
     // JAR 不存在时补下；已存在时保持官方语义，不重复做整文件 SHA1 校验。
     // NeoForge 26+ 的游戏 jar 由 FML 从 libraries 目录加载，版本目录 jar 不是
     // 启动产物；补出原版 jar 反而会被后续流程误用，因此跳过。
-    let jar_path = path.join(format!("{name}.jar"));
+    // `jar` 指向另一个版本时，主 JAR 在那个版本目录下；不能只看当前版本
+    // 目录，否则会把已经存在的目标 JAR 误判为缺失，并重复下载一份无用副本。
+    let main_jar_name = if meta.jar.is_empty() {
+        name.to_owned()
+    } else {
+        meta.jar.clone()
+    };
+    let jar_path = if main_jar_name == name {
+        path.join(format!("{name}.jar"))
+    } else {
+        path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(&main_jar_name)
+            .join(format!("{main_jar_name}.jar"))
+    };
     if !meta.main_class.starts_with("net.neoforged.fml.startup.") && !jar_path.is_file() {
         if let Some(main_jar) = meta.downloads.as_ref().and_then(|d| d.get("client")) {
             if let Err(err) = downloader.download_vanilla_jar(
@@ -184,7 +195,7 @@ fn fix_version_dir<R: Reporter>(
             ) {
                 tracing::warn!("补全版本 {name} 的客户端 JAR 失败：{err:?}");
             } else {
-                tracing::info!("已补全版本 {name} 的客户端 JAR");
+                tracing::info!("已补全版本 {name} 的客户端 JAR（{main_jar_name}）");
             }
         }
     }

@@ -28,6 +28,7 @@
 - `scl-macro`: [![](https://img.shields.io/badge/docs-passing-green)](https://steve-xmh.github.io/scl/scl-doc/scl_macro/index.html) 启动器过程宏库，包含了部分用于代码生成的过程宏代码，目前包含图标代码生成的简易过程宏
 - `scl-gui-animation`: [![](https://img.shields.io/badge/docs-passing-green)](https://steve-xmh.github.io/scl/scl-doc/scl_gui_animation/index.html) 启动器图形页面动画函数库，包含了一些方便用来制作非线性动画的函数和工具类
 - `scl-gui-widgets`: [![](https://img.shields.io/badge/docs-passing-green)](https://steve-xmh.github.io/scl/scl-doc/scl_gui_widgets/index.html) 启动器图形页面组件库，基于 [Druid](https://github.com/linebender/druid) 框架，提供了大量基于 WinUI3 设计规范制作的图形页面组件
+- `scl-gui-iced`: 启动器图形页面组件库的 [Iced](https://iced.rs)（tiny-skia）迁移实验，与基于 Druid 的 `scl-gui-widgets` 并行存在，详见 [scl-gui-iced/README.md](./scl-gui-iced/README.md)
 
 ## 关于开源协议和代码协作协议
 

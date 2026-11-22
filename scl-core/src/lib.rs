@@ -36,6 +36,7 @@ pub mod client;
 pub mod download;
 pub mod http;
 pub mod java;
+pub mod native;
 pub mod password;
 pub mod progress;
 pub mod semver;

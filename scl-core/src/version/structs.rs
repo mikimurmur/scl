@@ -536,6 +536,38 @@ impl VersionInfo {
         }
     }
 
+    /// 返回合并继承链后的版本元数据
+    ///
+    /// 若当前元数据包含 `inheritsFrom` 或 `clientVersion`，会读取父版本 JSON
+    /// 并把当前元数据覆盖到父元数据上；父版本不可用时返回当前元数据本身。
+    pub fn merged_meta(&self) -> Option<VersionMeta> {
+        let meta = self.meta.as_ref()?;
+        let inherits_from = if !meta.inherits_from.is_empty() {
+            meta.inherits_from.as_str()
+        } else if !meta.client_version.is_empty() && self.version != meta.client_version {
+            meta.client_version.as_str()
+        } else {
+            ""
+        };
+        if inherits_from.is_empty() {
+            return Some(meta.clone());
+        }
+
+        let mut base_info = VersionInfo {
+            version: inherits_from.to_owned(),
+            version_base: self.version_base.clone(),
+            ..Default::default()
+        };
+        if base_info.load().is_ok() {
+            if let Some(base) = &mut base_info.meta {
+                let mut base = base.clone();
+                base += meta.clone();
+                return Some(base);
+            }
+        }
+        Some(meta.clone())
+    }
+
     /// 删除版本文件夹，约等于删除整个版本
     ///
     /// 但是注意本操作不会清理 assets 文件夹和 libraries 文件夹的内容

@@ -210,7 +210,7 @@ pub fn locate_path(exe_name: impl AsRef<Path>) -> PathBuf {
 /// 目前根据 SCL 自身会支持的平台增加此处的枚举值
 ///
 /// 用于启动参数的条件判断组合
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arch {
     /// 一个 `x86` 平台
     X86,

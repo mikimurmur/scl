@@ -15,7 +15,7 @@ use crate::{
     java::JavaRuntime,
     prelude::*,
     utils::{get_full_path, CLASSPATH_SEPARATOR},
-    version::structs::{Allowed, VersionMeta},
+    version::structs::Allowed,
 };
 
 /// 用于修复 CVE-2021-44228 远程代码执行漏洞
@@ -117,38 +117,6 @@ fn get_game_directory(cfg: &ClientConfig) -> String {
     }
 }
 
-fn parse_inheritsed_meta(cfg: &ClientConfig) -> VersionMeta {
-    let meta = cfg.version_info.meta.as_ref().unwrap();
-    let inherits_from = if !meta.inherits_from.is_empty() {
-        meta.inherits_from.as_str()
-    } else if !meta.client_version.is_empty() && cfg.version_info.version != meta.client_version {
-        meta.client_version.as_str()
-    } else {
-        ""
-    };
-    if inherits_from.is_empty() {
-        meta.to_owned()
-    } else {
-        let meta = meta.to_owned();
-        let mut base_info = VersionInfo {
-            version: inherits_from.to_owned(),
-            version_base: cfg.version_info.version_base.to_owned(),
-            ..Default::default()
-        };
-        if base_info.load().is_ok() {
-            if let Some(base) = &mut base_info.meta {
-                let mut base = base.to_owned();
-                base += meta;
-                base
-            } else {
-                meta.to_owned()
-            }
-        } else {
-            meta
-        }
-    }
-}
-
 /// 获取启动参数中的 XUID。
 ///
 /// 只有微软账户携带真实 XUID；离线、Mojang 与 Authlib 账户没有该值，
@@ -211,14 +179,12 @@ impl Client {
     ///
     /// 这将会检查元数据，并组合出启动参数，之后可以使用 [`Client::launch`] 启动游戏
     pub fn new(mut cfg: ClientConfig) -> DynResult<Self> {
-        if cfg.version_info.meta.is_none() {
+        // 检查是否继承版本，并合并父版本元数据。
+        let Some(meta) = cfg.version_info.merged_meta() else {
             anyhow::bail!("VersionInfo must have meta loaded");
-        }
+        };
         // let build_args_timer = std::time::Instant::now();
         let mut args = Vec::<String>::with_capacity(64);
-
-        // 检查是否继承版本
-        let meta = parse_inheritsed_meta(&cfg);
 
         cfg.version_info.meta = Some(meta.to_owned());
 
@@ -237,6 +203,28 @@ impl Client {
         // 最终都经由 Client::new 组装参数，因此这里是公共入口。
         let required_java = meta.required_java_version();
         check_java_version(&cfg.version_info.version, required_java, &java_runtime)?;
+
+        // 启动前检查并补全当前平台的原生库。这里只读取 libraries 中已有的
+        // native jar，不会触发资源/普通依赖库/游戏 JAR 的完整补全流程。
+        let version_dir = Path::new(&cfg.version_info.version_base).join(&cfg.version_info.version);
+        let libraries_dir = Path::new(&cfg.version_info.version_base)
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("There's no parent from the version path"))?
+            .join("libraries");
+        let natives_dir = crate::native::resolve_native_dir(
+            &version_dir,
+            &cfg.version_info.version,
+            &meta,
+            java_runtime.arch(),
+        );
+        if let Err(err) = crate::native::ensure_native_libraries(
+            &meta,
+            &version_dir,
+            &libraries_dir,
+            java_runtime.arch(),
+        ) {
+            tracing::warn!("启动前检查/解压原生库失败：{err:?}");
+        }
 
         // 变量集，用来给参数中 ${VAR} 做文本替换
         let mut variables: HashMap<&'static str, String> = HashMap::with_capacity(19);
@@ -357,29 +345,7 @@ impl Client {
                 AuthMethod::AuthlibInjector { player_name, .. } => player_name.to_owned(),
             },
         );
-        #[cfg(target_os = "windows")]
-        let sub_native_dir = match java_runtime.arch() {
-            crate::utils::Arch::X86 => "natives-windows-x86",
-            crate::utils::Arch::X64 => "natives-windows",
-            crate::utils::Arch::ARM64 => "natives-windows-arm64",
-        };
-        #[cfg(target_os = "linux")]
-        let sub_native_dir = "natives-linux";
-        #[cfg(target_os = "macos")]
-        let sub_native_dir = match java_runtime.arch() {
-            crate::utils::Arch::X86 | crate::utils::Arch::X64 => "natives-macos",
-            crate::utils::Arch::ARM64 => "natives-macos-arm64",
-        };
-        variables.insert(
-            "${natives_directory}",
-            get_full_path(Path::new(&format!(
-                "{}{sep}{ver}{sep}natives/{}",
-                cfg.version_info.version_base,
-                sub_native_dir,
-                ver = cfg.version_info.version,
-                sep = std::path::MAIN_SEPARATOR,
-            ))),
-        );
+        variables.insert("${natives_directory}", get_full_path(&natives_dir));
         variables.insert("${version_name}", cfg.version_info.version.to_owned());
         variables.insert("${classpath_separator}", CLASSPATH_SEPARATOR.to_owned());
         variables.insert("${game_directory}", get_game_directory(&cfg));
@@ -773,6 +739,7 @@ impl Display for Client {
 #[cfg(test)]
 mod tests {
     use std::{
+        io::Write,
         path::{Path, PathBuf},
         sync::atomic::{AtomicUsize, Ordering},
     };
@@ -965,6 +932,60 @@ mod tests {
             .position(|arg| *arg == expected[0])
             .expect("元数据里的 JVM 参数未被转发");
         assert_eq!(&jvm_args[start..start + expected.len()], &expected[..]);
+    }
+
+    #[test]
+    fn native_directory_uses_os_arch_and_is_extracted_before_launch() {
+        let classifier = format!("natives-{}", crate::native::os_name());
+        let jar_relative = format!("org/example/native/1.0/native-1.0-{classifier}.jar");
+        let meta = format!(
+            r#"{{
+                "mainClass": "net.minecraft.client.main.Main",
+                "javaVersion": {{ "component": "java-runtime-epsilon", "majorVersion": 25 }},
+                "arguments": {{
+                    "game": [],
+                    "jvm": ["-Djava.library.path=${{natives_directory}}"]
+                }},
+                "libraries": [{{
+                    "name": "org.example:native:1.0:{classifier}",
+                    "downloads": {{
+                        "artifact": {{
+                            "path": "{jar_relative}",
+                            "sha1": "",
+                            "size": 0,
+                            "url": ""
+                        }}
+                    }}
+                }}]
+            }}"#
+        );
+        let fixture = Fixture::new("natives", &meta);
+        let jar_path = fixture.dir.join("libraries").join(&jar_relative);
+        fs_err::create_dir_all(jar_path.parent().unwrap()).unwrap();
+        let file = fs_err::File::create(&jar_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("libtest.so", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"native").unwrap();
+        zip.finish().unwrap();
+
+        let client = Client::new(fixture.config(25)).unwrap();
+        let natives_dir =
+            crate::native::default_native_dir(&fixture.version_dir, crate::utils::Arch::X64);
+        assert!(
+            natives_dir.join("libtest.so").is_file(),
+            "启动前没有解压到 {}",
+            natives_dir.display()
+        );
+        let expected = format!(
+            "-Djava.library.path={}",
+            crate::utils::get_full_path(&natives_dir)
+        );
+        assert!(
+            client.args.iter().any(|argument| argument == &expected),
+            "启动参数中没有新的 natives 目录：{:?}",
+            client.args
+        );
     }
 
     #[test]

@@ -7,7 +7,6 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Context;
 use tracing::*;
 
 use super::{
@@ -133,10 +132,7 @@ fn build_library_tasks(libraries: &[Library]) -> Vec<LibraryTask<'_>> {
         if let Some(downloads) = &lib.downloads {
             if let Some(classifier) = &downloads.classifiers {
                 for (platform, meta) in classifier.iter() {
-                    let target_platform = match platform.as_str() {
-                        "natives-osx" => "natives-macos",
-                        other => other,
-                    };
+                    let target_platform = crate::native::platform_dir_name(platform);
                     tasks.push(LibraryTask::Native {
                         platform: target_platform.into(),
                         sha1: meta.sha1.as_str().into(),
@@ -148,6 +144,7 @@ fn build_library_tasks(libraries: &[Library]) -> Vec<LibraryTask<'_>> {
             if let Some(artifact) = &downloads.artifact {
                 if let Some(i) = lib.name.find(":natives-") {
                     let (_, platform) = lib.name.split_at(i + 1);
+                    let platform = crate::native::platform_dir_name(platform);
                     tasks.push(LibraryTask::Native {
                         platform: platform.into(),
                         sha1: artifact.sha1.as_str().into(),
@@ -646,26 +643,23 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             )?;
         }
 
-        let native_dir = format!(
-            "{}/{}/natives",
-            self.minecraft_version_path.as_str(),
-            version_name
-        );
+        let version_dir = Path::new(&self.minecraft_version_path).join(version_name);
         // 26.3+ 的 JVM 参数要求 java.library.path 指向 `${natives_directory}/java`，
         // 原生库必须解压到该子目录；老版本仍解压到 `${natives_directory}` 本身。
         let natives_subdir = version_meta
             .natives_use_subdirectories()
-            .then_some(NATIVE_SUBDIR);
+            .then_some(crate::native::NATIVE_SUBDIR);
         let nr = r.sub();
         // 根分母已在下载开始前登记，这里只设置本进度条自己的分母。
         nr.set_max_progress(native_jars.len() as f64);
         nr.set_message("正在解压原生库".into());
         for (platform, items) in native_jars.iter() {
-            let native_dir = native_extract_dir(&native_dir, platform, natives_subdir);
+            let native_dir =
+                crate::native::native_extract_dir(&version_dir.join(platform), natives_subdir);
             for item in items {
                 // 修复只补缺失：目标目录里已有全部 native 文件时跳过解压。
-                if natives_need_extract(item, &native_dir) {
-                    unzip_natives(item, &native_dir)?;
+                if crate::native::natives_need_extract(Path::new(item), &native_dir) {
+                    crate::native::unzip_natives(Path::new(item), &native_dir)?;
                 }
             }
             nr.add_progress(1.);
@@ -910,92 +904,11 @@ impl<R: Reporter> Downloader<R> {
     }
 }
 
-const NATIVE_EXTS: &[&str] = &["dll", "so", "dylib", "jnilib"];
-/// 26.3+ 原生库的 JVM 搜索子目录名（对应 `java.library.path=${natives_directory}/java`）
-const NATIVE_SUBDIR: &str = "java";
-
-/// 计算某个平台的原生库解压目录
+/// 解压指定 ZIP 压缩文件中的原生库到指定文件夹
 ///
-/// 老版本直接解压到 `<natives>/<platform>`；26.3+ 需要多一层 `java` 子目录，
-/// 与 JVM 参数里的 `${natives_directory}/java` 对齐。
-fn native_extract_dir(base: &str, platform: &str, subdir: Option<&str>) -> String {
-    match subdir {
-        Some(subdir) => format!("{base}/{platform}/{subdir}"),
-        None => format!("{base}/{platform}"),
-    }
-}
-
-/// 判断 native 压缩包中是否还有未落盘的文件。
-///
-/// 打开/解析失败时返回 `true`，交给 [`unzip_natives`] 给出具体错误。
-fn natives_need_extract(unzip_file: &str, unzip_dir: &str) -> bool {
-    let Ok(file) = fs_err::File::open(unzip_file) else {
-        return true;
-    };
-    let Ok(mut archive) = zip::ZipArchive::new(file) else {
-        return true;
-    };
-    let dir = Path::new(unzip_dir);
-    for i in 0..archive.len() {
-        let Ok(file) = archive.by_index(i) else {
-            return true;
-        };
-        let Some(p) = file
-            .enclosed_name()
-            .and_then(|p| p.file_name().map(|name| name.to_owned()))
-        else {
-            continue;
-        };
-        let Some(ext) = Path::new(&p).extension() else {
-            continue;
-        };
-        if !NATIVE_EXTS.contains(&ext.to_str().unwrap_or_default()) {
-            continue;
-        }
-        if !dir.join(&p).is_file() {
-            return true;
-        }
-    }
-    false
-}
-
-/// 解压指定 ZIP 压缩文件的内容到指定文件夹
-///
-/// 如果文件夹不存在则创建
+/// 保留旧版公开接口，内部委托给 [`crate::native::unzip_natives`]。
 pub fn unzip_natives(unzip_file: &str, unzip_dir: &str) -> DynResult {
-    let file = fs_err::File::open(unzip_file)?;
-    let dir = std::path::PathBuf::from(unzip_dir);
-    let mut archive = zip::ZipArchive::new(file)
-        .with_context(|| format!("解压原生库 {unzip_file} 时发生错误"))?;
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        // zip 2.x 的 `enclosed_name` 返回拥有所有权的 PathBuf，这里直接取出文件名。
-        let p = match file
-            .enclosed_name()
-            .and_then(|p| p.file_name().map(|name| name.to_owned()))
-        {
-            Some(p) => p.to_owned(),
-            None => continue,
-        };
-        if let Some(ext) = Path::new(&p).extension() {
-            if !NATIVE_EXTS.contains(&ext.to_str().unwrap_or_default()) {
-                continue;
-            }
-        } else {
-            continue;
-        }
-        let save_path = dir.join(&p);
-        let save_dir = save_path.parent().unwrap();
-        let _ = fs_err::create_dir_all(save_dir);
-        debug!(
-            "解压原生库 {} 到 {}",
-            p.to_string_lossy(),
-            save_path.display()
-        );
-        let mut output = fs_err::File::create(save_path)?;
-        std::io::copy(&mut file, &mut output)?;
-    }
-    Ok(())
+    crate::native::unzip_natives(Path::new(unzip_file), Path::new(unzip_dir))
 }
 
 #[cfg(test)]
@@ -1003,7 +916,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_extract_dir_matches_metadata_generation() {
+    fn native_subdirectory_detection_matches_metadata_generation() {
         let legacy: VersionMeta = serde_json::from_str(
             r#"{
                 "mainClass": "net.minecraft.client.main.Main",
@@ -1018,10 +931,6 @@ mod tests {
         assert!(
             !legacy.natives_use_subdirectories(),
             "1.21.x 应保持平铺布局"
-        );
-        assert_eq!(
-            native_extract_dir("/v/1.21.1/natives", "natives-linux", None),
-            "/v/1.21.1/natives/natives-linux"
         );
 
         let modern: VersionMeta = serde_json::from_str(
@@ -1043,10 +952,6 @@ mod tests {
         assert!(
             modern.natives_use_subdirectories(),
             "26.3 应识别为子目录布局"
-        );
-        assert_eq!(
-            native_extract_dir("/v/26.3/natives", "natives-linux", Some(NATIVE_SUBDIR)),
-            "/v/26.3/natives/natives-linux/java"
         );
     }
 

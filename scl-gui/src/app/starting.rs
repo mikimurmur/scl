@@ -4,7 +4,11 @@ use druid::{EventCtx, ExtEventSink, Target};
 use scl_core::{
     client::{Client, ClientConfig},
     java::JavaRuntime,
-    version::structs::{SCLLaunchConfig as CoreSCLLaunchConfig, VersionInfo as CoreVersionInfo},
+    utils::Arch,
+    version::structs::{
+        SCLLaunchConfig as CoreSCLLaunchConfig, VersionInfo as CoreVersionInfo,
+        VersionMeta as CoreVersionMeta,
+    },
 };
 
 use crate::{
@@ -662,6 +666,14 @@ fn launch_game(
         .as_ref()
         .map(|x| x.game_independent)
         .unwrap_or(false);
+    // 启动前只检查/解压原生库，避免因为 natives 目录缺失而触发整套
+    // 「补全/修复版本文件」。检查失败时仍继续走 Client::new，让核心层再
+    // 尝试一次仅解压的兜底逻辑。
+    if let Some(meta) = version_info.merged_meta() {
+        if let Err(err) = prepare_native_libraries(&version_info, &meta, runtime.arch()) {
+            tracing::warn!("启动前原生库检查失败：{err:?}");
+        }
+    }
     tracing::info!("正在构造启动参数");
     let client = Client::new(ClientConfig {
         auth: account.into_core(),
@@ -775,6 +787,32 @@ fn disable_narrator(game_dir: &str) -> anyhow::Result<()> {
     if changed {
         fs_err::write(&path, format!("{}\n", lines.join("\n")))?;
         tracing::info!("已关闭 Minecraft narrator");
+    }
+    Ok(())
+}
+
+/// 启动前检查并解压当前平台的原生库
+///
+/// 只从 `libraries/` 中已有的 native jar 解压，不会下载资源、游戏 JAR 或
+/// 普通依赖库；压缩包本身缺失时留给现有修复流程处理。
+fn prepare_native_libraries(
+    version_info: &CoreVersionInfo,
+    meta: &CoreVersionMeta,
+    arch: Arch,
+) -> anyhow::Result<()> {
+    let version_base = std::path::Path::new(&version_info.version_base);
+    let minecraft_root = version_base
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("版本路径没有上级目录：{}", version_base.display()))?;
+    let version_dir = version_base.join(&version_info.version);
+    let libraries_dir = minecraft_root.join("libraries");
+    let report =
+        scl_core::native::ensure_native_libraries(meta, &version_dir, &libraries_dir, arch)?;
+    if !report.missing.is_empty() {
+        tracing::warn!(
+            "启动前检查原生库：{} 个压缩包缺失，跳过解压；如需补全请使用现有修复流程",
+            report.missing.len()
+        );
     }
     Ok(())
 }

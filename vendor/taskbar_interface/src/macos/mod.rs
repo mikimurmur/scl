@@ -1,42 +1,46 @@
 use std::sync::Arc;
 
-use icrate::{
-    objc2::{rc::Id, ClassType},
-    AppKit::{
-        NSApplication, NSDockTile, NSImageView, NSInformationalRequest, NSProgressIndicator,
-        NSProgressIndicatorStyleBar,
-    },
-    Foundation::{NSPoint, NSRect, NSSize},
+use objc2::rc::Retained;
+use objc2_app_kit::{
+    NSApplication, NSDockTile, NSImageView, NSProgressIndicator, NSProgressIndicatorStyle,
+    NSRequestUserAttentionType,
 };
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use once_cell::sync::Lazy;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::ProgressIndicatorState;
 
-static GLOBAL_TASKBAR_INDICATOR_INNER: Lazy<Arc<TaskbarIndicatorInner>> =
-    Lazy::new(|| Arc::new(TaskbarIndicatorInner::new()));
+static GLOBAL_TASKBAR_INDICATOR_INNER: Lazy<Arc<TaskbarIndicatorInner>> = Lazy::new(|| {
+    let mtm = MainThreadMarker::new()
+        .expect("taskbar_interface: macOS taskbar indicator must be created on the main thread");
+    Arc::new(TaskbarIndicatorInner::new(mtm))
+});
 
 struct TaskbarIndicatorInner {
-    progress_indicator_view: Id<NSProgressIndicator>,
-    dock_tile: Id<NSDockTile>,
+    progress_indicator_view: Retained<NSProgressIndicator>,
+    dock_tile: Retained<NSDockTile>,
 }
 
 unsafe impl Send for TaskbarIndicatorInner {}
 unsafe impl Sync for TaskbarIndicatorInner {}
 
 impl TaskbarIndicatorInner {
-    fn new() -> Self {
+    // `setBezeled` is a no-op since macOS 10.15, but keep the historical
+    // appearance on older systems.
+    #[allow(deprecated)]
+    fn new(mtm: MainThreadMarker) -> Self {
         unsafe {
-            let app = NSApplication::sharedApplication();
+            let app = NSApplication::sharedApplication(mtm);
             let dock_tile = app.dockTile();
             let prog = NSProgressIndicator::initWithFrame(
-                NSProgressIndicator::alloc(),
+                mtm.alloc::<NSProgressIndicator>(),
                 NSRect::new(
                     NSPoint::new(0., 0.),
                     NSSize::new(dock_tile.size().width, 10.),
                 ),
             );
-            prog.setStyle(NSProgressIndicatorStyleBar);
+            prog.setStyle(NSProgressIndicatorStyle::Bar);
             prog.setBezeled(true);
             prog.setHidden(false);
             prog.setIndeterminate(true);
@@ -44,10 +48,16 @@ impl TaskbarIndicatorInner {
             prog.setDisplayedWhenStopped(true);
             prog.setMaxValue(100.);
             prog.setMinValue(0.);
-            if let Some(content_view) = dock_tile.contentView() {
+            if let Some(content_view) = dock_tile.contentView(mtm) {
                 content_view.addSubview(&prog);
             } else {
-                let app_img_view = NSImageView::init(NSImageView::alloc());
+                let app_img_view = NSImageView::initWithFrame(
+                    mtm.alloc::<NSImageView>(),
+                    NSRect::new(
+                        NSPoint::new(0., 0.),
+                        NSSize::new(dock_tile.size().width, dock_tile.size().height),
+                    ),
+                );
                 if let Some(app_img) = app.applicationIconImage() {
                     app_img_view.setImage(Some(&app_img));
                 }
@@ -75,8 +85,16 @@ impl TaskbarIndicator {
         _window: RawWindowHandle,
         _display: RawDisplayHandle,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        if MainThreadMarker::new().is_none() {
+            return Err(
+                "taskbar_interface: macOS taskbar indicator must be created on the main thread"
+                    .into(),
+            );
+        }
+        // The lazy initializer re-checks the current thread; we have already
+        // verified above that we are on the main thread.
         Ok(Self {
-            inner: GLOBAL_TASKBAR_INDICATOR_INNER.clone(),
+            inner: Lazy::force(&GLOBAL_TASKBAR_INDICATOR_INNER).clone(),
         })
     }
 
@@ -148,9 +166,9 @@ impl TaskbarIndicator {
         needs_attention: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if needs_attention {
-            unsafe {
-                NSApplication::sharedApplication().requestUserAttention(NSInformationalRequest);
-            }
+            let mtm = MainThreadMarker::from(&*self.inner.progress_indicator_view);
+            NSApplication::sharedApplication(mtm)
+                .requestUserAttention(NSRequestUserAttentionType::NSInformationalRequest);
         }
         Ok(())
     }

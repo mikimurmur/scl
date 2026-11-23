@@ -9,6 +9,12 @@
 
 - `Cargo.toml`：`windows` 从 `"*"` 固定为 `"0.62.2"`；移除没有 build.rs /
   example 使用的 build-dependencies 与 dev-dependencies。
+- `Cargo.toml`：macOS 依赖从 `icrate 0.0.4` 换成 `objc2 0.5` +
+  `objc2-app-kit 0.2` + `objc2-foundation 0.2`。
+- `src/macos/mod.rs`：跟随 `objc2 0.5` 重写（`Id` → `Retained`，
+  `MainThreadMarker`，`NSProgressIndicatorStyle::Bar` 等）。`icrate 0.0.4`
+  依赖的 `objc2 0.4.1` 在 Rust 1.100 下因 trait solver 变化无法编译，
+  且上游没有 0.4.x 新版本。
 - `src/windows/mod.rs`：适配 `windows` 0.62 的 `HWND` 指针类型，并显式忽略
   `FlashWindowEx` 的 `BOOL` 返回值。
 

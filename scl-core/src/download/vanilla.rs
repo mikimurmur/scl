@@ -25,11 +25,7 @@ const META_TIMEOUT: Duration = Duration::from_secs(15);
 /// 直接复用 [`crate::http::download`] 的单源重试与临时文件语义，只是给
 /// 每个源套一层超时，避免不可达镜像让整个任务永久挂起（见
 /// [`super::timeout_after`] 的说明）。
-async fn download_with_sources(
-    uris: &[String],
-    dest: &str,
-    per_source: Duration,
-) -> DynResult {
+async fn download_with_sources(uris: &[String], dest: &str, per_source: Duration) -> DynResult {
     let mut last_err = None;
     for uri in uris {
         match timeout_after(
@@ -677,11 +673,12 @@ impl<R: Reporter> VanillaDownloadExt for Downloader<R> {
             DownloadSource::MCBBS => format!("https://download.mcbbs.net{url_path}"),
             _ => format!("https://launchermeta.mojang.com{url_path}"),
         };
-        let res = match timeout_after(META_TIMEOUT, crate::http::retry_get_bytes(&meta_uri)).await {
-            Some(res) => res,
-            None => anyhow::bail!("下载版本元数据超时：{meta_uri}"),
-        }
-        .map_err(|e| anyhow::anyhow!("下载版本元数据失败：{:?}", e))?;
+        let res =
+            match timeout_after(META_TIMEOUT, crate::http::retry_get_bytes(&meta_uri)).await {
+                Some(res) => res,
+                None => anyhow::bail!("下载版本元数据超时：{meta_uri}"),
+            }
+            .map_err(|e| anyhow::anyhow!("下载版本元数据失败：{:?}", e))?;
 
         inner_future::fs::write(&version_file, &res).await?;
 

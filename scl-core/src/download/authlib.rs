@@ -40,16 +40,12 @@ impl<R: Reporter> AuthlibDownloadExt for Downloader<R> {
             }
             _ => "https://authlib-injector.yushi.moe/artifact/latest.json",
         };
-        let latest_data: LatestData = match timeout_after(
-            META_TIMEOUT,
-            crate::http::get(meta_uri).recv_json(),
-        )
-        .await
-        {
-            Some(res) => res,
-            None => anyhow::bail!("获取 Authlib-Injector 版本元数据超时：{meta_uri}"),
-        }
-        .map_err(|e| anyhow::anyhow!(e))?;
+        let latest_data: LatestData =
+            match timeout_after(META_TIMEOUT, crate::http::get(meta_uri).recv_json()).await {
+                Some(res) => res,
+                None => anyhow::bail!("获取 Authlib-Injector 版本元数据超时：{meta_uri}"),
+            }
+            .map_err(|e| anyhow::anyhow!(e))?;
         r.add_progress(1.);
         r.set_message(format!("正在下载 Authlib-Injector {}", latest_data.version));
         let download_url = latest_data.download_url;

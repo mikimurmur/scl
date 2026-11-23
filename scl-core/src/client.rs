@@ -185,14 +185,13 @@ impl Client {
                         sep = std::path::MAIN_SEPARATOR,
                     )
                 };
-                let mut lib_path = if let Some(ds) = &lib.downloads {
+                let lib_path = if let Some(ds) = &lib.downloads {
                     if let Some(d) = &ds.artifact {
                         // 使用 artifact.path
                         format!(
                             "{}{sep}{}",
                             lib_base_path,
-                            d.path
-                                .replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR),
+                            d.path.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR),
                             sep = std::path::MAIN_SEPARATOR
                         )
                     } else {
@@ -212,9 +211,11 @@ impl Client {
                     lib_args
                         .into_iter()
                         .map(|x| x.1)
-                        .chain(meta.main_jars.iter().map(|a| {
-                            a.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR)
-                        }))
+                        .chain(
+                            meta.main_jars
+                                .iter()
+                                .map(|a| a.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR)),
+                        )
                         .collect()
                 };
 

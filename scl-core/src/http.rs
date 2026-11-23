@@ -309,9 +309,7 @@ pub mod no_retry {
                     assert_eq!(response.access_token.as_string(), "jwt.token.value");
                     assert_eq!(response.client_token, "cf63005efb2fd19f2d2942786bc9153e");
                     assert_eq!(response.available_profiles.len(), 1);
-                    assert_eq!(
-                        response.selected_profile.as_ref().unwrap().name, "RoleA"
-                    );
+                    assert_eq!(response.selected_profile.as_ref().unwrap().name, "RoleA");
                 }
                 RequestResult::Err(err) => panic!("应解析为成功响应，实际为错误：{err:?}"),
             }
@@ -325,9 +323,7 @@ pub mod no_retry {
             match parse_body::<AuthenticateResponse>(body).unwrap() {
                 RequestResult::Ok(response) => {
                     assert!(response.available_profiles.is_empty());
-                    assert_eq!(
-                        response.selected_profile.as_ref().unwrap().name, "RoleA"
-                    );
+                    assert_eq!(response.selected_profile.as_ref().unwrap().name, "RoleA");
                 }
                 RequestResult::Err(err) => panic!("应解析为成功响应，实际为错误：{err:?}"),
             }

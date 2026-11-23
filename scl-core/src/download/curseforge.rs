@@ -240,9 +240,7 @@ pub async fn get_mod_icon_url(url: &str) -> DynResult<image::DynamicImage> {
         .map_err(|e| anyhow::anyhow!(e))?;
     // 官方在 mods_download_*::get_icon 闭包里对图标做 resize_to_fill
     image::load_from_memory(&data)
-        .map(|img| {
-            img.resize_to_fill(64, 64, image::imageops::FilterType::Triangle)
-        })
+        .map(|img| img.resize_to_fill(64, 64, image::imageops::FilterType::Triangle))
         .map_err(|e| anyhow::anyhow!(e))
 }
 

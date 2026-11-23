@@ -401,10 +401,7 @@ mod timeout_tests {
     /// 正常完成的 future 原样返回结果，不受超时影响。
     #[test]
     fn timeout_after_returns_completed_value() {
-        let result = smol::block_on(timeout_after(
-            Duration::from_millis(500),
-            async { 42 },
-        ));
+        let result = smol::block_on(timeout_after(Duration::from_millis(500), async { 42 }));
         assert_eq!(result, Some(42));
     }
 }

@@ -1,6 +1,10 @@
 //! 启动器的应用逻辑。
 //!
 //! 所有界面之间共享的逻辑以及后台任务都放在这里。
+//!
+//! 迁移到 Iced 后，后台任务仍然使用与旧版相同的“选择器 + 命令”模式与
+//! 界面通信。这里的 [`Selector`] / [`Command`] / [`EventSink`] 是旧版
+//! Druid API 的最小兼容层，避免为了换 UI 框架而重写全部业务逻辑。
 
 pub mod download;
 pub mod java;
@@ -12,13 +16,16 @@ pub mod settings;
 pub mod starting;
 pub mod version_setting;
 
-use std::path::PathBuf;
+use std::any::Any;
+use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use druid::{
-    commands, Command, Event, EventCtx, LifeCycle, LifeCycleCtx, Selector, Target, Widget,
-    WidgetPod,
-};
+use futures::channel::mpsc;
+use iced::widget::image;
+use iced::{Element, Subscription, Task, window};
 use im::Vector;
+use once_cell::sync::Lazy;
 use scl_core::{auth::generate_offline_uuid, download::AuthlibDownloadExt};
 
 use crate::{
@@ -30,11 +37,309 @@ use crate::{
     ui::{
         PAGE_ACCOUNTS, PAGE_DOWNLOAD, PAGE_LAUNCH_ERROR, PAGE_LOGIN_AUTHLIB,
         PAGE_LOGIN_AUTHLIB_SELECT, PAGE_LOGIN_MICROSOFT, PAGE_LOGIN_OFFLINE, PAGE_MAIN,
-        PAGE_MODS_DOWNLOAD_CURSEFORGE, PAGE_MODS_DOWNLOAD_MODRINTH, PAGE_MOD_DOWNLOAD_DEST,
-        PAGE_STARTING, PAGE_VERSION_SETTING, PAGE_VERSION_SETTING_MODS,
+        PAGE_MOD_DOWNLOAD_DEST, PAGE_MODS_DOWNLOAD, PAGE_MODS_DOWNLOAD_CURSEFORGE,
+        PAGE_MODS_DOWNLOAD_MODRINTH, PAGE_STARTING, PAGE_VERSION_SETTING,
+        PAGE_VERSION_SETTING_MODS,
     },
-    utils::{thread::thread_main, Progress},
+    utils::{Progress, thread::thread_main},
 };
+
+/// 一个带类型的选择器。
+///
+/// 兼容层只使用选择器的名字做匹配，载荷保存在 [`Command`] 里；这样后台
+/// 任务仍然可以像旧版一样先构造命令，再交给界面线程处理。
+pub struct Selector<T> {
+    name: &'static str,
+    _marker: PhantomData<fn(T)>,
+}
+
+impl<T> Selector<T> {
+    /// 创建一个新的选择器。
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            _marker: PhantomData,
+        }
+    }
+
+    /// 附带载荷，构造一个命令。
+    pub fn with(self, payload: T) -> CommandBuilder<T> {
+        CommandBuilder {
+            selector: self,
+            payload,
+            target: Target::Global,
+        }
+    }
+}
+
+impl<T> Clone for Selector<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Selector<T> {}
+
+/// 命令的目标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// 全局命令。
+    Global,
+    /// 指定窗口。
+    Window(window::Id),
+}
+
+/// 尚未确定目标的命令构造器。
+pub struct CommandBuilder<T> {
+    selector: Selector<T>,
+    payload: T,
+    target: Target,
+}
+
+impl<T: Send + Sync + 'static> CommandBuilder<T> {
+    /// 设置命令目标。
+    pub fn to(mut self, target: Target) -> Command {
+        self.target = target;
+        Command {
+            name: self.selector.name,
+            payload: Arc::new(self.payload),
+        }
+    }
+}
+
+/// 一条在界面线程和后台任务之间传递的命令。
+#[derive(Clone)]
+pub struct Command {
+    name: &'static str,
+    payload: Arc<dyn Any + Send + Sync>,
+}
+
+impl std::fmt::Debug for Command {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Command").field("name", &self.name).finish()
+    }
+}
+
+impl Command {
+    /// 如果命令由指定选择器构造，返回载荷。
+    pub fn get<T: 'static>(&self, selector: Selector<T>) -> Option<&T> {
+        if self.name == selector.name {
+            self.payload.downcast_ref::<T>()
+        } else {
+            None
+        }
+    }
+
+    /// 命令是否由指定选择器构造。
+    pub fn is<T>(&self, selector: Selector<T>) -> bool {
+        self.name == selector.name
+    }
+}
+
+/// 与 Druid 的 `FileInfo` 对应的文件选择结果。
+#[derive(Debug, Clone)]
+pub struct FileInfo {
+    path: PathBuf,
+}
+
+impl FileInfo {
+    /// 从路径创建。
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// 文件/文件夹路径。
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// 后台任务向界面发送消息的句柄。
+#[derive(Clone)]
+pub struct EventSink {
+    sender: mpsc::UnboundedSender<Message>,
+}
+
+impl EventSink {
+    /// 直接发送一条消息。
+    pub fn send(&self, message: Message) {
+        let _ = self.sender.unbounded_send(message);
+    }
+
+    /// 兼容旧版的三参数命令发送接口。
+    pub fn submit_command<T: Send + Sync + 'static>(
+        &self,
+        selector: Selector<T>,
+        payload: T,
+        target: Target,
+    ) -> Result<(), ()> {
+        self.send(Message::Command(selector.with(payload).to(target)));
+        Ok(())
+    }
+}
+
+/// 旧版 Druid 的 `ExtEventSink` 在迁移后的等价类型。
+pub type ExtEventSink = EventSink;
+
+/// 界面线程中的命令上下文。
+#[derive(Clone)]
+pub struct EventCtx {
+    sink: EventSink,
+    window: window::Id,
+}
+
+impl EventCtx {
+    fn new(sink: EventSink, window: window::Id) -> Self {
+        Self { sink, window }
+    }
+
+    /// 获取向界面线程发送消息的句柄。
+    pub fn get_external_handle(&self) -> EventSink {
+        self.sink.clone()
+    }
+
+    /// 提交一条命令。
+    pub fn submit_command(&self, command: Command) {
+        // 窗口操作不是业务命令，直接转换为 Message，避免再去轮询目标窗口。
+        if command.is(CLOSE_WINDOW) {
+            self.sink.send(Message::CloseWindow);
+        } else if command.is(HIDE_WINDOW) {
+            self.sink.send(Message::HideWindow);
+        } else if command.is(QUIT_APP) {
+            self.sink.send(Message::Quit);
+        } else {
+            self.sink.send(Message::Command(command));
+        }
+    }
+
+    /// 当前窗口 ID。
+    pub fn window_id(&self) -> window::Id {
+        self.window
+    }
+}
+
+/// 进度上报消息。
+#[derive(Debug, Clone)]
+pub enum ProgressMessage {
+    /// 新建一条进度。
+    New(usize),
+    /// 增加当前进度。
+    Add(usize, f64),
+    /// 增加最大进度。
+    AddMax(usize, f64),
+    /// 设置最大进度。
+    SetMax(usize, f64),
+    /// 设置当前进度。
+    Set(usize, f64),
+    /// 设置主消息。
+    SetMessage(usize, String),
+    /// 设置次级消息。
+    SetSubMessage(usize, String),
+    /// 隐藏进度（不确定进度）。
+    Hide(usize),
+    /// 移除进度。
+    Remove(usize),
+}
+
+/// 界面消息。
+#[derive(Debug, Clone)]
+pub enum Message {
+    /// 一条业务命令。
+    Command(Command),
+    /// 进度更新。
+    Progress(ProgressMessage),
+    /// 窗口标题栏操作。
+    Window(scl_gui_widgets::widgets::WindowMessage),
+    /// 窗口 ID 已就绪。
+    WindowReady(Option<window::Id>),
+    /// 关闭窗口。
+    CloseWindow,
+    /// 隐藏窗口。
+    HideWindow,
+    /// 退出程序。
+    Quit,
+    /// 后台任务发生非致命错误。
+    AsyncError(String, String),
+    /// 关闭异步错误提示。
+    DismissAsyncError,
+    /// 复制异步错误到剪切板。
+    CopyAsyncError,
+    /// 页面控件产生的界面消息。
+    Ui(crate::ui::UiMessage),
+    /// 动画帧。
+    Tick,
+    /// 选择游戏文件夹。
+    PickFolder,
+    /// 选择 Java 可执行文件。
+    PickJava,
+    /// 搜索可用的 Java 运行时。
+    SearchJava,
+    /// 选择模组保存位置。
+    SaveMod,
+    /// 文件夹选择完成。
+    FolderPicked(Option<PathBuf>),
+    /// Java 选择完成。
+    JavaPicked(Option<PathBuf>),
+    /// 模组保存位置选择完成。
+    ModSavePicked(Option<PathBuf>),
+}
+
+/// 全局消息发送端。
+static EVENT_TX: Lazy<mpsc::UnboundedSender<Message>> = Lazy::new(|| {
+    let (tx, rx) = mpsc::unbounded();
+    *EVENT_RX.lock().unwrap() = Some(rx);
+    tx
+});
+
+/// 全局消息接收端，由 Iced 的订阅取走。
+static EVENT_RX: Lazy<Mutex<Option<mpsc::UnboundedReceiver<Message>>>> =
+    Lazy::new(|| Mutex::new(None));
+
+/// 获取全局消息发送句柄。
+pub fn event_sink() -> EventSink {
+    Lazy::force(&EVENT_TX);
+    EventSink {
+        sender: EVENT_TX.clone(),
+    }
+}
+
+/// 把后台任务错误发送到界面。
+pub fn report_async_error(location: impl Into<String>, error: impl Into<String>) {
+    let _ = EVENT_TX.unbounded_send(Message::AsyncError(location.into(), error.into()));
+}
+
+/// 取出全局消息接收端（只会成功一次）。
+fn take_event_receiver() -> Option<mpsc::UnboundedReceiver<Message>> {
+    Lazy::force(&EVENT_TX);
+    EVENT_RX.lock().unwrap().take()
+}
+
+/// 页面入栈命令。
+pub const PUSH_PAGE: Selector<&'static str> = Selector::new("net.stevexmh.scl.push-page");
+/// 返回指定页面命令。
+pub const QUERY_POP_PAGE: Selector<&'static str> = Selector::new("net.stevexmh.scl.query-pop-page");
+/// 重置页面栈命令。
+pub const RESET_PAGE_TO: Selector<&'static str> = Selector::new("net.stevexmh.scl.reset-page-to");
+/// 启用/禁用标题栏返回按钮。
+pub const ENABLE_BACK_PAGE: Selector<bool> = Selector::new("net.stevexmh.scl.enable-back-page");
+/// 设置页面切换动画（Iced 版本保留字段，不再有动画）。
+pub const SET_SLIDE_PAGE_ANIMATION: Selector<bool> =
+    Selector::new("net.stevexmh.scl.set-slide-page-animation");
+/// 设置窗口背景图。
+pub const SET_BACKGROUND_IMAGE: Selector<image::Handle> =
+    Selector::new("net.stevexmh.scl.set-background-image");
+/// 标题栏返回按钮点击。
+pub const BACK_PAGE_CLICKED: Selector<()> = Selector::new("net.stevexmh.scl.back-page-clicked");
+/// 请求关闭窗口。
+pub const QUERY_CLOSE_WINDOW: Selector<()> = Selector::new("net.stevexmh.scl.query-close-window");
+/// 关闭窗口。
+pub const CLOSE_WINDOW: Selector<()> = Selector::new("net.stevexmh.scl.close-window");
+/// 隐藏窗口。
+pub const HIDE_WINDOW: Selector<()> = Selector::new("net.stevexmh.scl.hide-window");
+/// 退出程序。
+pub const QUIT_APP: Selector<()> = Selector::new("net.stevexmh.scl.quit-app");
+/// 文件选择器返回。
+pub const OPEN_FILE: Selector<FileInfo> = Selector::new("net.stevexmh.scl.open-file");
 
 /// 从界面上选择了一个游戏版本
 pub const SELECT_VERSION: Selector<String> = Selector::new("net.stevexmh.scl.select-version");
@@ -57,13 +362,12 @@ pub const SELECT_JAVA: Selector<crate::config::JavaRuntimeInfo> =
 pub const DELETE_JAVA: Selector<crate::config::JavaRuntimeInfo> =
     Selector::new("net.stevexmh.scl.delete-java");
 /// 手动添加 Java 运行时（作为文件选择器的 accept command，携带 FileInfo）
-pub const MANUALLY_ADD_JAVA: Selector<druid::FileInfo> =
+pub const MANUALLY_ADD_JAVA: Selector<FileInfo> =
     Selector::new("net.stevexmh.scl.manually-add-java");
 /// 设置内存大小
 pub const SET_MEMORY_STRING: Selector<String> = Selector::new("net.stevexmh.scl.set-memory-str");
 /// 添加 Minecraft 文件夹
-pub const ADD_MC_FOLDER: Selector<druid::FileInfo> =
-    Selector::new("net.stevexmh.scl.add-mc-folder");
+pub const ADD_MC_FOLDER: Selector<FileInfo> = Selector::new("net.stevexmh.scl.add-mc-folder");
 /// 删除 Minecraft 文件夹
 pub const DEL_MC_FOLDER: Selector<usize> = Selector::new("net.stevexmh.scl.del-mc-folder");
 /// 选择 Minecraft 文件夹
@@ -123,7 +427,7 @@ pub const DELETE_MOD: Selector<String> = Selector::new("net.stevexmh.scl.delete-
 /// 从版本设置页面下载模组
 pub const INSTALL_MOD: Selector<String> = Selector::new("net.stevexmh.scl.install-mod");
 /// 保存模组到指定路径
-pub const SAVE_MOD: Selector<druid::FileInfo> = Selector::new("net.stevexmh.scl.save-mod");
+pub const SAVE_MOD: Selector<FileInfo> = Selector::new("net.stevexmh.scl.save-mod");
 /// 设置模组文件列表
 pub const SET_MOD_FILES: Selector<()> = Selector::new("net.stevexmh.scl.set-mod-files");
 /// 模组下载完成
@@ -402,7 +706,7 @@ pub fn update_or_create_auth(ctx: &EventCtx, data: &mut AppState, auth: AuthMeth
 /// 从 Mojang 会话服务获取玩家头部与帽子皮肤像素
 async fn fetch_head_skin(uuid: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
     use anyhow::Context as _;
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     let profile: serde_json::Value = scl_core::http::retry_get_json(format!(
         "https://sessionserver.mojang.com/session/minecraft/profile/{uuid}"
@@ -449,33 +753,20 @@ pub fn offline_account(name: &str, uuid: &str) -> AuthMethod {
     }
 }
 
-/// 启动器的根组件，用于处理全局命令并启动后台任务。
+/// 启动器根状态。Iced 的 `application` 直接以它作为应用状态。
 pub struct AppWrapper {
-    inner: WidgetPod<AppState, Box<dyn Widget<AppState>>>,
+    /// 全局业务状态。
+    pub state: AppState,
     started: bool,
-    /// 上一次 on_page 通知的页面 ID，用于区分「首次进入主页」与
-    /// 「从启动中页面返回主页」，避免误清刚设置的启动贴士。
+    /// 上一次进入的页面，用于区分「首次进入主页」与从启动页返回。
     last_page: String,
-    /// 紧随其后的 ON_PAGE 是否由 POP 触发。
-    ///
-    /// PageSwitcher 在弹栈动画帧内先发 POP_PAGE 再发 ON_PAGE（与 push 路径
-    /// 共用同一个 ON_PAGE 选择器）；官方模组搜索页只在 **push** 时清空并
-    /// 重载默认列表，返回（pop）时保留搜索词与结果。这里用该标记复刻。
+    /// 紧随其后的页面进入是否由返回触发。
     next_on_page_is_pop: bool,
 }
 
 impl AppWrapper {
-    /// 创建一个新的根组件
-    pub fn new(inner: impl Widget<AppState> + 'static) -> Self {
-        Self {
-            inner: WidgetPod::new(Box::new(inner)),
-            started: false,
-            last_page: String::new(),
-            next_on_page_is_pop: false,
-        }
-    }
-
-    fn handle_command(&mut self, ctx: &mut EventCtx, cmd: &Command, data: &mut AppState) -> bool {
+    fn handle_command(&mut self, ctx: &mut EventCtx, cmd: &Command) -> bool {
+        let data = &mut self.state;
         if let Some(name) = cmd.get(SELECT_VERSION) {
             data.config.selected_version = name.to_owned();
             data.update_selected_version();
@@ -731,7 +1022,7 @@ impl AppWrapper {
                 Ok(())
             });
             return true;
-        } else if let Some(file_info) = cmd.get(commands::OPEN_FILE) {
+        } else if let Some(file_info) = cmd.get(OPEN_FILE) {
             let path = file_info.path();
             if path.is_file() {
                 if let Some(path) = path.to_str() {
@@ -801,7 +1092,8 @@ impl AppWrapper {
         false
     }
 
-    fn handle_app_event(&mut self, ctx: &mut EventCtx, event: AppEvent, data: &mut AppState) {
+    fn handle_app_event(&mut self, ctx: &mut EventCtx, event: AppEvent) {
+        let data = &mut self.state;
         match event {
             AppEvent::VersionsLoaded(versions) => {
                 data.versions = versions.into();
@@ -927,11 +1219,7 @@ impl AppWrapper {
             AppEvent::MicrosoftSuccess => {
                 data.login_microsoft_success = true;
                 data.login_error = None;
-                ctx.submit_command(
-                    scl_gui_widgets::widgets::ENABLE_BACK_PAGE
-                        .with(false)
-                        .to(Target::Global),
-                );
+                ctx.submit_command(ENABLE_BACK_PAGE.with(false).to(Target::Global));
             }
             AppEvent::UpdateChecked(result) => match result {
                 Ok((version, logs)) => {
@@ -941,8 +1229,7 @@ impl AppWrapper {
                 }
                 Err(_) => {
                     // 官方在更新记录拉取失败时于更新页展示网络错误提示，而不是一直停留在加载中。
-                    let notice =
-                        "肥肠抱歉……因网络错误无法获取更新记录……但是新版本肯定有很多新东西的！所以快更新吧！";
+                    let notice = "肥肠抱歉……因网络错误无法获取更新记录……但是新版本肯定有很多新东西的！所以快更新吧！";
                     data.update_logs = Some(notice.to_owned());
                     data.setting_about_update_logs = data.update_logs.to_owned();
                 }
@@ -950,7 +1237,7 @@ impl AppWrapper {
             AppEvent::UpdateFinished(result) => match result {
                 Ok(()) => {
                     data.setting_about_update_logs = Some("正在覆盖当前版本".into());
-                    ctx.submit_command(druid::commands::CLOSE_WINDOW.to(ctx.window_id()));
+                    ctx.submit_command(CLOSE_WINDOW.with(()).to(Target::Window(ctx.window_id())));
                 }
                 Err(err) => {
                     data.setting_about_update_logs = Some(format!("无法更新 SCL：{err}"));
@@ -1013,17 +1300,14 @@ impl AppWrapper {
                 data.rebuild_mods_filter();
                 data.version_setting_mods_desc = mods_desc.clone();
                 if cache_epoch == data.version_setting_cache_epoch {
-                    data.version_setting_cache_put(
-                        crate::app_state::VersionSettingCacheEntry {
-                            version_name,
-                            mods: data.version_mods.clone(),
-                            mods_desc,
-                            maps_desc: data.version_setting_maps_desc.clone(),
-                            resource_packs_desc: data.version_setting_resource_packs_desc
-                                .clone(),
-                            epoch: cache_epoch,
-                        },
-                    );
+                    data.version_setting_cache_put(crate::app_state::VersionSettingCacheEntry {
+                        version_name,
+                        mods: data.version_mods.clone(),
+                        mods_desc,
+                        maps_desc: data.version_setting_maps_desc.clone(),
+                        resource_packs_desc: data.version_setting_resource_packs_desc.clone(),
+                        epoch: cache_epoch,
+                    });
                 }
             }
             AppEvent::VersionSettingSaved(name) => {
@@ -1197,14 +1481,14 @@ impl AppWrapper {
                         #[cfg(target_os = "windows")]
                         starting::hide_launcher_window();
                         let window = ctx.window_id();
-                        ctx.submit_command(commands::HIDE_WINDOW.to(Target::Window(window)));
+                        ctx.submit_command(HIDE_WINDOW.with(()).to(Target::Window(window)));
                     }
                     if !data.config.dont_close_window_when_launched {
                         // 与关窗一致：退出前同步保存，避免异步任务被进程退出打断。
                         if let Err(err) = config::save_config_sync(&data.config) {
                             tracing::error!("启动游戏后保存配置文件失败：{err:?}");
                         }
-                        ctx.submit_command(commands::QUIT_APP);
+                        ctx.submit_command(QUIT_APP.with(()).to(Target::Global));
                     } else {
                         trace_auto_page("pop", PAGE_MAIN, "GameWindowReady");
                         ctx.submit_command(
@@ -1332,52 +1616,8 @@ impl AppWrapper {
         }
     }
 
-    fn handle_notification(
-        &mut self,
-        ctx: &mut EventCtx,
-        notification: &druid::Notification,
-        data: &mut AppState,
-    ) {
-        if notification.is(crate::ui::ON_PAGE) {
-            if let Some(page) = notification.get(crate::ui::ON_PAGE) {
-                self.on_page(ctx, data, page);
-            }
-        } else if notification.is(scl_gui_widgets::widgets::POP_PAGE) {
-            if let Some(page) = notification.get(scl_gui_widgets::widgets::POP_PAGE) {
-                // 同一动画帧内随后会发 ON_PAGE；标记它为 pop，供 on_page 区分。
-                self.next_on_page_is_pop = true;
-                if *page == PAGE_LOGIN_MICROSOFT {
-                    data.login_microsoft_success = false;
-                    data.login_microsoft_code.clear();
-                    data.login_microsoft_url.clear();
-                    data.login_error = None;
-                    data.login_busy = false;
-                } else if *page == PAGE_VERSION_SETTING {
-                    // 官方在该页弹出时异步保存版本设置（含重命名）。
-                    version_setting::on_app_pop_page(ctx, data);
-                }
-            }
-        } else if notification.is(scl_gui_widgets::widgets::BACK_PAGE_CLICKED) {
-            ctx.submit_command(crate::ui::QUERY_POP_PAGE.with("").to(Target::Global));
-        } else if notification.is(scl_gui_widgets::widgets::QUERY_CLOSE_WINDOW) {
-            // DEV-10：官方关窗不保存版本级设置，会丢修改；这里在退出前补一次同步写盘。
-            if crate::ui::PAGE_VERSION_SETTING == self.last_page
-                || crate::ui::PAGE_VERSION_SETTING_MODS == self.last_page
-                || crate::ui::PAGE_VERSION_SETTING_ADVANCE == self.last_page
-                || crate::ui::PAGE_VERSION_SETTING_REMOVE == self.last_page
-            {
-                version_setting::save_on_close(data);
-            }
-            // 官方在关窗时同步落盘（save_config_sync）。本地原实现异步保存后
-            // 立刻 QUIT_APP，进程先退出导致文件根本没写完，这是设置丢失的根因。
-            if let Err(err) = config::save_config_sync(&data.config) {
-                tracing::error!("关闭前保存配置文件失败：{err:?}");
-            }
-            ctx.submit_command(commands::QUIT_APP);
-        }
-    }
-
-    fn on_page(&mut self, ctx: &mut EventCtx, data: &mut AppState, page: &str) {
+    fn on_page(&mut self, ctx: &mut EventCtx, page: &str) {
+        let data = &mut self.state;
         tracing::debug!("on_page: {page:?}");
         // ON_PAGE 同时用于 push 与 pop；只有 push 才执行「进入页面」逻辑。
         let is_pop = std::mem::take(&mut self.next_on_page_is_pop);
@@ -1389,11 +1629,7 @@ impl AppWrapper {
         }
         self.last_page = page.to_owned();
         let enable_back = page != PAGE_MAIN;
-        ctx.submit_command(
-            scl_gui_widgets::widgets::ENABLE_BACK_PAGE
-                .with(enable_back)
-                .to(Target::Global),
-        );
+        ctx.submit_command(ENABLE_BACK_PAGE.with(enable_back).to(Target::Global));
         match page {
             PAGE_DOWNLOAD => download::on_app_push_page(ctx, data),
             PAGE_VERSION_SETTING => version_setting::on_app_push_page(ctx, data),
@@ -1468,7 +1704,661 @@ impl AppWrapper {
     }
 }
 
-/// 启动失败/崩溃终态：先回主界面，再推入启动失败页
+impl AppWrapper {
+    /// 创建 Iced 应用，读取配置并准备后台任务。
+    pub fn boot() -> (Self, Task<Message>) {
+        let mut config = match config::get_config_sync() {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::error!("读取配置文件失败，将使用默认配置：{err:?}");
+                config::Config::default()
+            }
+        };
+        config::apply_auth_override(&mut config, config::load_auth_data());
+        let first_run = !config::config_path().exists();
+        let mut state = AppState::new(config);
+        state.first_run = first_run;
+        if std::env::var_os("SCL_MOCK").is_some() {
+            crate::app_state::apply_mock(&mut state);
+        }
+
+        let launcher = Self {
+            state,
+            started: false,
+            last_page: String::new(),
+            next_on_page_is_pop: false,
+        };
+
+        (launcher, iced::window::latest().map(Message::WindowReady))
+    }
+
+    /// Iced 的消息处理入口。
+    pub fn update(&mut self, message: Message) -> Task<Message> {
+        let old_config = self.state.config.clone();
+        let task = match message {
+            Message::WindowReady(id) => {
+                self.state.window = id;
+                self.start();
+                Task::none()
+            }
+            Message::Command(command) => self.handle_command_message(command),
+            Message::Progress(progress) => {
+                self.apply_progress(progress);
+                Task::none()
+            }
+            Message::Window(message) => {
+                let ctx = self.event_ctx();
+                match message {
+                    scl_gui_widgets::widgets::WindowMessage::Back => {
+                        self.query_pop_page(&ctx, "");
+                        Task::none()
+                    }
+                    scl_gui_widgets::widgets::WindowMessage::Drag => {
+                        iced::window::drag(self.window_id())
+                    }
+                    scl_gui_widgets::widgets::WindowMessage::Minimize => {
+                        iced::window::minimize(self.window_id(), true)
+                    }
+                    scl_gui_widgets::widgets::WindowMessage::Close => self.close_window(),
+                }
+            }
+            Message::CloseWindow => self.close_window(),
+            Message::HideWindow => {
+                if let Some(id) = self.state.window {
+                    iced::window::minimize(id, true)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::Quit => {
+                self.save_before_quit();
+                iced::exit()
+            }
+            Message::AsyncError(location, error) => {
+                self.state.async_error = Some((location, error));
+                Task::none()
+            }
+            Message::DismissAsyncError => {
+                self.state.async_error = None;
+                Task::none()
+            }
+            Message::CopyAsyncError => {
+                if let Some((_, error)) = &self.state.async_error {
+                    crate::panic::copy_to_clipboard(error.clone());
+                }
+                Task::none()
+            }
+            Message::Ui(message) => self.handle_ui_message(message),
+            Message::Tick => {
+                self.state.animation_phase = (self.state.animation_phase + 0.02) % 1.0;
+                Task::none()
+            }
+            Message::PickFolder => Task::perform(
+                async {
+                    smol::unblock(|| {
+                        rfd::FileDialog::new()
+                            .set_title("请选择一个 .minecraft 游戏文件夹")
+                            .pick_folder()
+                    })
+                    .await
+                },
+                Message::FolderPicked,
+            ),
+            Message::PickJava => Task::perform(
+                async {
+                    smol::unblock(|| {
+                        rfd::FileDialog::new()
+                            .set_title("请选择名称为 java 的运行时")
+                            .pick_file()
+                    })
+                    .await
+                },
+                Message::JavaPicked,
+            ),
+            Message::SearchJava => {
+                let ctx = self.event_ctx();
+                java::search_java(&ctx, &self.state);
+                Task::none()
+            }
+            Message::SaveMod => {
+                let file_name = self
+                    .state
+                    .mod_file_downloads_selected
+                    .as_ref()
+                    .or_else(|| {
+                        self.state
+                            .mod_file_downloads_files
+                            .as_ref()
+                            .and_then(|files| files.front())
+                    })
+                    .map(|file| file.file_name.clone())
+                    .unwrap_or_default();
+                let mod_name = self
+                    .state
+                    .mod_file_downloads_info
+                    .as_ref()
+                    .map(|info| info.name.clone())
+                    .unwrap_or_default();
+                Task::perform(
+                    async move {
+                        smol::unblock(move || {
+                            rfd::FileDialog::new()
+                                .set_file_name(file_name)
+                                .set_title(format!("请选择保存模组 {mod_name} 的路径"))
+                                .save_file()
+                        })
+                        .await
+                    },
+                    Message::ModSavePicked,
+                )
+            }
+            Message::FolderPicked(path) => {
+                let task = match path {
+                    Some(path) => {
+                        let mut ctx = self.event_ctx();
+                        let folder = crate::config::MinecraftFolder::Other(
+                            path.to_string_lossy().to_string(),
+                        );
+                        add_minecraft_folder(&mut ctx, &mut self.state, folder);
+                        Task::none()
+                    }
+                    None => Task::none(),
+                };
+                task
+            }
+            Message::JavaPicked(path) => {
+                if let Some(path) = path {
+                    if let Some(path) = path.to_str() {
+                        let ctx = self.event_ctx();
+                        java::manually_add_java(&ctx, &mut self.state, path);
+                    }
+                }
+                Task::none()
+            }
+            Message::ModSavePicked(path) => {
+                if let Some(path) = path {
+                    mod_download_dest::save_mod(
+                        &self.event_ctx(),
+                        &mut self.state,
+                        &FileInfo::new(path),
+                    );
+                }
+                Task::none()
+            }
+        };
+
+        // 设置页会直接改 config；统一监听并防抖落盘。
+        if old_config != self.state.config {
+            self.state.theme = crate::theme::theme_from_config(&self.state.config);
+            save_config_debounced(&self.state);
+        }
+
+        task
+    }
+
+    /// Iced 的视图入口。
+    pub fn view(&self) -> Element<'_, Message> {
+        crate::ui::view(&self.state)
+    }
+
+    /// Iced 订阅：把后台任务通过全局队列发来的消息转换到界面上。
+    pub fn subscription(&self) -> Subscription<Message> {
+        let mut subscriptions = vec![
+            Subscription::run(event_stream),
+            iced::window::close_requests().map(|_| Message::Quit),
+        ];
+
+        if self.is_animating() {
+            subscriptions.push(iced::window::frames().map(|_| Message::Tick));
+        }
+
+        Subscription::batch(subscriptions)
+    }
+
+    fn is_animating(&self) -> bool {
+        if !self.state.progress.is_empty()
+            || self.state.launching
+            || self.state.login_busy
+            || self.state.mods_download_curseforge_searching
+            || self.state.mods_download_modrinth_searching
+            || self.state.launching
+        {
+            return true;
+        }
+
+        match *self.state.pages.current() {
+            PAGE_STARTING => true,
+            PAGE_LOGIN_MICROSOFT => {
+                self.state.login_error.is_none() && self.state.login_microsoft_code.is_empty()
+                    || self.state.login_microsoft_success
+            }
+            PAGE_MODS_DOWNLOAD_CURSEFORGE => {
+                self.state.mods_download_curseforge_result_mods.is_none()
+            }
+            PAGE_MODS_DOWNLOAD_MODRINTH => self.state.mods_download_modrinth_result_mods.is_none(),
+            _ => false,
+        }
+    }
+
+    /// Iced 的基础主题，仅用于输入框等标准控件；组件自身颜色由 SCL 主题控制。
+    pub fn theme(&self) -> iced::Theme {
+        if self.state.theme.is_dark() {
+            iced::Theme::Dark
+        } else {
+            iced::Theme::Light
+        }
+    }
+
+    fn event_ctx(&self) -> EventCtx {
+        EventCtx::new(
+            event_sink(),
+            self.state.window.unwrap_or_else(window::Id::unique),
+        )
+    }
+
+    fn window_id(&self) -> window::Id {
+        self.state.window.unwrap_or_else(window::Id::unique)
+    }
+
+    fn start(&mut self) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+
+        let ctx = self.event_ctx();
+        let sink = ctx.get_external_handle();
+        if std::env::var_os("SCL_MOCK").is_none() {
+            starting::init(sink.clone(), &self.state);
+            if self.state.first_run {
+                starting::init_settings(sink.clone(), self.state.config.clone());
+            }
+        }
+
+        if let Ok(page) = std::env::var("SCL_START_PAGE") {
+            if !page.is_empty() {
+                let page: &'static str = Box::leak(page.into_boxed_str());
+                tracing::debug!("test hook SCL_START_PAGE={page:?}: 2s 后自动 PUSH_PAGE");
+                let sink = sink.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    trace_auto_page("push", page, "SCL_START_PAGE hook");
+                    let _ = sink.submit_command(PUSH_PAGE, page, Target::Global);
+                });
+            }
+        }
+
+        ctx.submit_command(
+            SET_SLIDE_PAGE_ANIMATION
+                .with(self.state.config.theme.slide_page_animation)
+                .to(Target::Global),
+        );
+
+        if !self
+            .state
+            .config
+            .theme
+            .theme_background_image_path
+            .is_empty()
+        {
+            let path = PathBuf::from(&self.state.config.theme.theme_background_image_path);
+            if let Ok(image) = ::image::open(path) {
+                if let Ok(handle) = crate::utils::thread::image_handle_from_dynamic(image) {
+                    let _ = sink.submit_command(SET_BACKGROUND_IMAGE, handle, Target::Global);
+                }
+            }
+        }
+    }
+
+    fn handle_command_message(&mut self, command: Command) -> Task<Message> {
+        let mut ctx = self.event_ctx();
+
+        if let Some(page) = command.get(PUSH_PAGE) {
+            let page = *page;
+            self.push_page(&ctx, page);
+        } else if let Some(page) = command.get(QUERY_POP_PAGE) {
+            let page = *page;
+            self.query_pop_page(&ctx, page);
+        } else if let Some(page) = command.get(RESET_PAGE_TO) {
+            let page = *page;
+            self.reset_page(&ctx, page);
+        } else if let Some(enabled) = command.get(ENABLE_BACK_PAGE) {
+            self.state.back_enabled = *enabled;
+        } else if let Some(slide) = command.get(SET_SLIDE_PAGE_ANIMATION) {
+            self.state.slide_page_animation = *slide;
+        } else if let Some(handle) = command.get(SET_BACKGROUND_IMAGE) {
+            self.state.background_image = Some(handle.clone());
+        } else if command.is(BACK_PAGE_CLICKED) {
+            self.query_pop_page(&ctx, "");
+        } else if command.is(QUERY_CLOSE_WINDOW) {
+            return self.close_window();
+        } else if let Some(event) = command.get(APP_EVENT) {
+            let event = event.clone();
+            self.handle_app_event(&mut ctx, event);
+        } else {
+            self.handle_command(&mut ctx, &command);
+        }
+
+        Task::none()
+    }
+
+    fn push_page(&mut self, ctx: &EventCtx, page: &'static str) {
+        if *self.state.pages.current() == page {
+            let mut ctx = ctx.clone();
+            self.on_page(&mut ctx, page);
+            return;
+        }
+        self.state.pages.push(page);
+        let mut ctx = ctx.clone();
+        self.on_page(&mut ctx, page);
+    }
+
+    fn query_pop_page(&mut self, ctx: &EventCtx, target: &'static str) {
+        let old = *self.state.pages.current();
+        if !target.is_empty() && old == target {
+            return;
+        }
+        let changed = if target.is_empty() {
+            self.state.pages.pop().is_some()
+        } else {
+            self.state.pages.pop_to(&target)
+        };
+        if !changed {
+            return;
+        }
+        self.handle_pop_page(ctx, old);
+        self.next_on_page_is_pop = true;
+        let current = *self.state.pages.current();
+        let mut ctx = ctx.clone();
+        self.on_page(&mut ctx, current);
+    }
+
+    fn reset_page(&mut self, ctx: &EventCtx, page: &'static str) {
+        let old = *self.state.pages.current();
+        self.state.pages.reset_to(page);
+        if old != page {
+            self.handle_pop_page(ctx, old);
+        }
+        self.next_on_page_is_pop = false;
+        let mut ctx = ctx.clone();
+        self.on_page(&mut ctx, page);
+    }
+
+    fn handle_pop_page(&mut self, ctx: &EventCtx, page: &str) {
+        let data = &mut self.state;
+        if page == PAGE_LOGIN_MICROSOFT {
+            data.login_microsoft_success = false;
+            data.login_microsoft_code.clear();
+            data.login_microsoft_url.clear();
+            data.login_error = None;
+            data.login_busy = false;
+        } else if page == PAGE_VERSION_SETTING {
+            // 官方在该页弹出时异步保存版本设置（含重命名）。
+            let mut ctx = ctx.clone();
+            version_setting::on_app_pop_page(&mut ctx, data);
+        }
+    }
+
+    fn close_window(&mut self) -> Task<Message> {
+        let last_page = self.last_page.clone();
+        let data = &mut self.state;
+        if last_page == PAGE_VERSION_SETTING
+            || last_page == crate::ui::PAGE_VERSION_SETTING_MODS
+            || last_page == crate::ui::PAGE_VERSION_SETTING_ADVANCE
+            || last_page == crate::ui::PAGE_VERSION_SETTING_REMOVE
+        {
+            version_setting::save_on_close(data);
+        }
+        if let Err(err) = config::save_config_sync(&data.config) {
+            tracing::error!("关闭前保存配置文件失败：{err:?}");
+        }
+        iced::exit()
+    }
+
+    fn save_before_quit(&mut self) {
+        if let Err(err) = config::save_config_sync(&self.state.config) {
+            tracing::error!("退出前保存配置文件失败：{err:?}");
+        }
+    }
+
+    fn apply_progress(&mut self, message: ProgressMessage) {
+        match message {
+            ProgressMessage::New(id) => {
+                self.state.progress.entry(id).or_default();
+            }
+            ProgressMessage::Remove(id) => {
+                self.state.progress.remove(&id);
+            }
+            ProgressMessage::Add(id, value) => {
+                if let Some(entry) = self.state.progress.get_mut(&id) {
+                    entry.current += value;
+                }
+            }
+            ProgressMessage::AddMax(id, value) => {
+                if let Some(entry) = self.state.progress.get_mut(&id) {
+                    entry.max = Some(entry.max.unwrap_or(0.0) + value);
+                }
+            }
+            ProgressMessage::SetMax(id, value) => {
+                if let Some(entry) = self.state.progress.get_mut(&id) {
+                    entry.max = Some(value);
+                }
+            }
+            ProgressMessage::Set(id, value) => {
+                if let Some(entry) = self.state.progress.get_mut(&id) {
+                    entry.current = value;
+                }
+            }
+            ProgressMessage::SetMessage(id, value) => {
+                if let Some(entry) = self.state.progress.get_mut(&id) {
+                    entry.message = value;
+                }
+            }
+            ProgressMessage::SetSubMessage(id, value) => {
+                if let Some(entry) = self.state.progress.get_mut(&id) {
+                    entry.sub_message = value;
+                }
+            }
+            ProgressMessage::Hide(id) => {
+                if let Some(entry) = self.state.progress.get_mut(&id) {
+                    entry.max = None;
+                }
+            }
+        }
+    }
+
+    /// 具体页面的输入消息由 `ui` 模块定义；这里集中处理需要改全局状态的输入。
+    fn handle_ui_message(&mut self, message: crate::ui::UiMessage) -> Task<Message> {
+        use crate::ui::{BoolField, ChoiceField, TextField, UiMessage};
+
+        let mut ctx = self.event_ctx();
+        let data = &mut self.state;
+
+        match message {
+            UiMessage::Text(field, value) => match field {
+                TextField::VersionsFilter => data.versions_search_filter = value,
+                TextField::DownloadVersionName => data.download_version_name = value,
+                TextField::VersionRename => data.version_setting_version_name_rename = value,
+                TextField::VersionModsFilter => {
+                    data.version_mods_search_filter = value;
+                    data.rebuild_mods_filter();
+                }
+                TextField::AccountsFilter => data.accounts_filter = value,
+                TextField::OfflineName => data.login_offline_user_name = value,
+                TextField::OfflineUuid => data.login_offline_uuid = value,
+                TextField::AuthlibServer => data.login_authlib_server_url = value,
+                TextField::AuthlibUser => data.login_authlib_username = value,
+                TextField::AuthlibPassword => data.login_authlib_password = value,
+                TextField::CurseforgeFilter => {
+                    data.mods_download_curseforge_search_filter = value;
+                }
+                TextField::ModrinthFilter => {
+                    data.mods_download_modrinth_search_filter = value;
+                    ctx.submit_command(MR_APPLY_SEARCH.with(()).to(Target::Global));
+                }
+                TextField::GlobalMemory => {
+                    data.setting_launch_java_memory_size = value.clone();
+                    ctx.submit_command(SET_MEMORY_STRING.with(value).to(Target::Global));
+                }
+                TextField::JvmArgs => data.config.jvm_args = value,
+                TextField::GameArgs => data.config.game_args = value,
+                TextField::WrapperPath => data.config.wrapper_path = value,
+                TextField::WrapperArgs => data.config.wrapper_args = value,
+                TextField::VersionJvmArgs => data.version_setting_config.jvm_args = value,
+                TextField::VersionGameArgs => data.version_setting_config.game_args = value,
+                TextField::VersionJavaPath => data.version_setting_config.java_path = value,
+                TextField::VersionWindowTitle => data.version_setting_config.window_title = value,
+                TextField::VersionWrapperPath => data.version_setting_config.wrapper_path = value,
+                TextField::VersionWrapperArgs => data.version_setting_config.wrapper_args = value,
+                TextField::VersionMaxMemory => {
+                    data.version_setting_config.max_mem_text = value;
+                    if data.version_setting_config.override_max_mem {
+                        data.version_setting_config.max_mem =
+                            data.version_setting_config.max_mem_text.trim().parse().ok();
+                    }
+                }
+            },
+            UiMessage::Bool(field, value) => match field {
+                BoolField::DarkTheme => data.config.theme.dark_theme = value,
+                BoolField::SlideAnimation => {
+                    data.config.theme.slide_page_animation = value;
+                    data.slide_page_animation = value;
+                }
+                BoolField::AutoMemory => data.config.auto_mem_size = value,
+                BoolField::WaitUntilLaunched => data.config.wait_until_launched = value,
+                BoolField::DontCloseWindow => {
+                    data.config.dont_close_window_when_launched = value;
+                }
+                BoolField::HideWindow => data.config.hide_window_when_launched = value,
+                BoolField::AutoRecheck => {
+                    data.config.auto_check_when_first_start_failed = value;
+                }
+                BoolField::VersionEnable => data.version_setting_config.enable = value,
+                BoolField::VersionIndependent => {
+                    data.version_setting_config.game_independent = value;
+                }
+                BoolField::VersionOverrideMemory => {
+                    data.version_setting_config.override_max_mem = value;
+                    if value {
+                        data.version_setting_config.max_mem =
+                            data.version_setting_config.max_mem_text.trim().parse().ok();
+                    } else {
+                        data.version_setting_config.max_mem = None;
+                    }
+                }
+            },
+            UiMessage::Choice(field, index) => match field {
+                ChoiceField::VersionIndependentMethod => {
+                    data.config.version_independent_method = match index {
+                        0 => crate::config::VersionIndependentMethod::NoIndependent,
+                        1 => crate::config::VersionIndependentMethod::IndependentForNonRelease,
+                        2 => crate::config::VersionIndependentMethod::IndependentForModLoader,
+                        3 => {
+                            crate::config::VersionIndependentMethod::IndependentForModLoaderAndNonRelease
+                        }
+                        _ => crate::config::VersionIndependentMethod::IndependentAll,
+                    };
+                }
+                ChoiceField::DownloadSource => {
+                    data.config.download_source = match index {
+                        1 => crate::core::DownloadSource::BmclApi,
+                        2 => crate::core::DownloadSource::Mcbbs,
+                        _ => crate::core::DownloadSource::Default,
+                    };
+                }
+            },
+            UiMessage::ToggleSort => {
+                data.versions_sort_mode = match data.versions_sort_mode {
+                    0 => 1,
+                    1 => 2,
+                    2 => 3,
+                    _ => 0,
+                };
+            }
+            UiMessage::ToggleFolder(key) => {
+                if !data.collapsed_folders.remove(&key) {
+                    data.collapsed_folders.insert(key);
+                }
+            }
+            UiMessage::ToggleMod { path, enabled } => {
+                if let Some(item) = data.version_mods.iter_mut().find(|item| item.path == path) {
+                    item.enabled = enabled;
+                }
+                if let Some(item) = data
+                    .version_mods_filtered
+                    .iter_mut()
+                    .find(|item| item.path == path)
+                {
+                    item.enabled = enabled;
+                }
+                ctx.submit_command(TOGGLE_MOD.with(path).to(Target::Global));
+            }
+            UiMessage::SelectLoaderVersion { kind, version } => {
+                download::select_loader_version(data, kind, &version);
+                self.query_pop_page(&ctx, "");
+            }
+            UiMessage::SelectVanillaVersion(name) => {
+                let selected = data
+                    .download_state_vanilla
+                    .get()
+                    .and_then(|versions| versions.all_versions().find(|x| x.name == name).cloned());
+                if let Some(version) = selected {
+                    data.selected_download_version = Some(version);
+                    data.clear_loader_versions();
+                    download::update_download_version_name(data);
+                    download::reload_current_loader(&mut ctx, data);
+                }
+                self.query_pop_page(&ctx, "");
+            }
+            UiMessage::SetSettingPage(index) => {
+                data.setting_page_index = index;
+                if index == 2 && data.update_available.is_none() {
+                    ctx.submit_command(CHECK_UPDATE.with(()).to(Target::Global));
+                }
+            }
+            UiMessage::SetParallel(value) => {
+                data.config.download_parallel_amount = value.min(256);
+            }
+            UiMessage::CopyText(text) => {
+                crate::panic::copy_to_clipboard(text);
+            }
+            UiMessage::OpenModsPage => {
+                if !data.config.selected_version.is_empty() {
+                    data.mod_download_install_version = data.config.selected_version.clone();
+                }
+                self.push_page(&ctx, PAGE_MODS_DOWNLOAD);
+            }
+            UiMessage::OpenVersionDir(sub) => {
+                version_setting::open_version_dir(data, sub);
+            }
+            UiMessage::InstallMod(version) => {
+                mod_download_dest::install(&ctx, data, &version);
+                self.query_pop_page(&ctx, "");
+            }
+            UiMessage::CheckUpdate => {
+                data.update_available = None;
+                data.update_logs = None;
+                data.setting_about_update_logs = Some("检查更新中……".into());
+                ctx.submit_command(CHECK_UPDATE.with(()).to(Target::Global));
+            }
+        }
+
+        Task::none()
+    }
+}
+
+fn event_stream() -> impl futures::Stream<Item = Message> {
+    use futures::StreamExt;
+
+    futures::stream::unfold(take_event_receiver(), |receiver| async move {
+        let mut receiver = receiver?;
+        receiver
+            .next()
+            .await
+            .map(|message| (message, Some(receiver)))
+    })
+}
+
 fn show_launch_error_page(ctx: &EventCtx) {
     let sink = ctx.get_external_handle();
     thread_main(async move {
@@ -1480,120 +2370,6 @@ fn show_launch_error_page(ctx: &EventCtx) {
         let _ = sink.submit_command(crate::ui::PUSH_PAGE, PAGE_LAUNCH_ERROR, Target::Global);
         Ok(())
     });
-}
-
-impl Widget<AppState> for AppWrapper {
-    fn event(&mut self, ctx: &mut EventCtx, event: &Event, data: &mut AppState, env: &druid::Env) {
-        match event {
-            Event::Command(cmd) => {
-                #[cfg(unix)]
-                crate::utils::progress::update_taskbar_progress(cmd, ctx.window());
-                if cmd.is(APP_EVENT) {
-                    if let Some(event) = cmd.get(APP_EVENT) {
-                        self.handle_app_event(ctx, event.to_owned(), data);
-                    }
-                } else {
-                    self.handle_command(ctx, cmd, data);
-                }
-            }
-            Event::Notification(notification) => {
-                self.handle_notification(ctx, notification, data);
-            }
-            _ => {}
-        }
-        self.inner.event(ctx, event, data, env);
-    }
-
-    fn lifecycle(
-        &mut self,
-        ctx: &mut LifeCycleCtx,
-        event: &LifeCycle,
-        data: &AppState,
-        env: &druid::Env,
-    ) {
-        if let LifeCycle::WidgetAdded = event {
-            if !self.started {
-                self.started = true;
-                let sink = ctx.get_external_handle();
-                if std::env::var_os("SCL_MOCK").is_none() {
-                    starting::init(sink.clone(), data);
-                    if data.first_run {
-                        starting::init_settings(sink.clone(), data.config.to_owned());
-                    }
-                }
-                if let Ok(page) = std::env::var("SCL_START_PAGE") {
-                    let page: &'static str = Box::leak(page.into_boxed_str());
-                    if !page.is_empty() {
-                        tracing::debug!(
-                            "test hook SCL_START_PAGE={page:?}: 2s 后自动 PUSH_PAGE"
-                        );
-                        let sink = sink.clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_secs(2));
-                            trace_auto_page("push", page, "SCL_START_PAGE hook");
-                            let _ = sink.submit_command(crate::ui::PUSH_PAGE, page, Target::Global);
-                        });
-                    }
-                }
-                ctx.submit_command(
-                    crate::ui::SET_SLIDE_PAGE_ANIMATION
-                        .with(data.config.theme.slide_page_animation)
-                        .to(Target::Global),
-                );
-                if !data.config.theme.theme_background_image_path.is_empty() {
-                    let path = PathBuf::from(&data.config.theme.theme_background_image_path);
-                    if let Ok(image) = image::open(path) {
-                        if let Ok(buf) = crate::utils::thread::image_buf_from_dynamic(image) {
-                            let _ = sink.submit_command(
-                                scl_gui_widgets::widgets::SET_BACKGROUND_IMAGE,
-                                buf,
-                                Target::Global,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        self.inner.lifecycle(ctx, event, data, env);
-    }
-
-    fn update(
-        &mut self,
-        ctx: &mut druid::UpdateCtx,
-        old_data: &AppState,
-        data: &AppState,
-        env: &druid::Env,
-    ) {
-        // 设置页通过 Lens 直接修改 config，不会产生命令；这里统一监听 config
-        // 变化并防抖落盘，保证修改后即使不关窗也不会丢设置。
-        if old_data.config != data.config {
-            save_config_debounced(data);
-        }
-        if old_data.config.theme.slide_page_animation != data.config.theme.slide_page_animation {
-            ctx.submit_command(
-                crate::ui::SET_SLIDE_PAGE_ANIMATION
-                    .with(data.config.theme.slide_page_animation)
-                    .to(Target::Global),
-            );
-        }
-        self.inner.update(ctx, data, env);
-    }
-
-    fn layout(
-        &mut self,
-        ctx: &mut druid::LayoutCtx,
-        bc: &druid::BoxConstraints,
-        data: &AppState,
-        env: &druid::Env,
-    ) -> druid::Size {
-        let size = self.inner.layout(ctx, bc, data, env);
-        self.inner.set_origin(ctx, druid::Point::ZERO);
-        size
-    }
-
-    fn paint(&mut self, ctx: &mut druid::PaintCtx, data: &AppState, env: &druid::Env) {
-        self.inner.paint(ctx, data, env);
-    }
 }
 
 fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
@@ -1725,5 +2501,3 @@ fn login_authlib(ctx: &mut EventCtx, data: &mut AppState) {
         Ok(())
     });
 }
-
-

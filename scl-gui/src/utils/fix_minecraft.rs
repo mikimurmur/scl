@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Context;
 use futures::TryStreamExt;
 use scl_core::{
-    download::{authlib::AuthlibDownloadExt, vanilla::VanillaDownloadExt, Downloader},
+    download::{Downloader, authlib::AuthlibDownloadExt, vanilla::VanillaDownloadExt},
     progress::Reporter,
     version::structs::{VersionInfo, VersionMeta},
 };
@@ -25,7 +25,7 @@ pub async fn fix_minecraft<P: AsRef<Path>, R: Reporter>(
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(err) => {
-            return Err(err).context(format!("读取版本目录 {} 失败", versions_dir.display()))
+            return Err(err).context(format!("读取版本目录 {} 失败", versions_dir.display()));
         }
     };
 
@@ -145,7 +145,11 @@ async fn fix_version_dir<R: Reporter>(
     if !parent_name.is_empty() {
         let parent_json = path
             .parent()
-            .map(|versions| versions.join(&parent_name).join(format!("{parent_name}.json")))
+            .map(|versions| {
+                versions
+                    .join(&parent_name)
+                    .join(format!("{parent_name}.json"))
+            })
             .unwrap_or_else(|| Path::new(".").join(format!("{parent_name}.json")));
         let parent_meta = std::fs::read(&parent_json)
             .ok()
@@ -157,9 +161,7 @@ async fn fix_version_dir<R: Reporter>(
                 meta = merged;
             }
             None => {
-                tracing::warn!(
-                    "版本 {name} 的父版本 {parent_name} 元数据不可用，跳过文件补全"
-                );
+                tracing::warn!("版本 {name} 的父版本 {parent_name} 元数据不可用，跳过文件补全");
                 return Ok(fixed);
             }
         }
@@ -175,11 +177,7 @@ async fn fix_version_dir<R: Reporter>(
     if !jar_path.is_file() {
         if let Some(main_jar) = meta.downloads.as_ref().and_then(|d| d.get("client")) {
             if let Err(err) = downloader
-                .download_vanilla_jar(
-                    &main_jar.url,
-                    &jar_path.to_string_lossy(),
-                    &main_jar.sha1,
-                )
+                .download_vanilla_jar(&main_jar.url, &jar_path.to_string_lossy(), &main_jar.sha1)
                 .await
             {
                 tracing::warn!("补全版本 {name} 的客户端 JAR 失败：{err:?}");

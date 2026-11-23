@@ -1,42 +1,42 @@
 //! 删除版本确认页面。
 
-use druid::{
-    widget::{CrossAxisAlignment, Flex},
-    Color, Env, Target, Widget, WidgetExt,
-};
-use scl_gui_widgets::{
-    theme::color::typography,
-    widgets::{label, Button},
-};
+use iced::widget::{column, space};
+use iced::{Element, Length};
 
-use crate::{app::REMOVE_VERSION, app_state::AppState};
+use crate::{
+    app::{Message, REMOVE_VERSION},
+    app_state::AppState,
+    ui::common,
+};
 
 /// 创建删除版本确认页面
-pub fn ui_builder() -> Box<dyn Widget<AppState>> {
-    let title = label::new("你认真的？").with_font(typography::TITLE);
+pub fn view(state: &AppState) -> Element<'_, Message> {
+    let theme = state.theme;
 
-    let message = label::dynamic(|data: &AppState, _: &Env| {
-        format!("确定要删除版本 {} 吗？", data.version_setting_version_name)
-    });
+    let content = column![
+        common::title(&theme, "你认真的？"),
+        space().height(Length::Fixed(10.0)),
+        common::label(
+            &theme,
+            format!("确定要删除版本 {} 吗？", state.version_setting_version_name)
+        ),
+        space().height(Length::Fixed(10.0)),
+        iced::widget::text("这个操作不可撤销！")
+            .size(theme.typography.base.size)
+            .font(theme.typography.base.font)
+            .color(iced::Color::from_rgb8(255, 0, 0)),
+        space().height(Length::Fill),
+        common::button(
+            &theme,
+            "删除版本",
+            scl_gui_widgets::widgets::ButtonKind::Danger,
+            common::command(REMOVE_VERSION, ()),
+        ),
+    ]
+    .spacing(0)
+    .padding(10)
+    .width(Length::Fill)
+    .height(Length::Fill);
 
-    let warning = label::new("这个操作不可撤销！").with_text_color(Color::rgb8(255, 0, 0));
-
-    Box::new(
-        Flex::column()
-            .cross_axis_alignment(CrossAxisAlignment::Fill)
-            .with_child(title)
-            .with_spacer(10.)
-            .with_child(message)
-            .with_spacer(10.)
-            .with_child(warning)
-            .with_flex_spacer(1.)
-            .with_child(
-                Button::new("删除版本")
-                    .expand_width()
-                    .on_click(|ctx, _data, _env| {
-                        ctx.submit_command(REMOVE_VERSION.with(()).to(Target::Global));
-                    }),
-            )
-            .padding(10.),
-    )
+    content.into()
 }

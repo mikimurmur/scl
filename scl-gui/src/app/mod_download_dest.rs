@@ -2,13 +2,13 @@
 
 use std::path::PathBuf;
 
-use druid::{EventCtx, ExtEventSink, FileInfo, Target};
+use crate::app::{EventCtx, ExtEventSink, FileInfo, Target};
 
 use crate::{
-    app::{AppEvent, APP_EVENT},
+    app::{APP_EVENT, AppEvent},
     app_state::{AppState, LocalVersionInfo, ModFileState},
     core::VersionType,
-    utils::{prelude, thread::thread_main, Progress},
+    utils::{Progress, prelude, thread::thread_main},
 };
 
 /// 根据版本名称获取模组安装目录

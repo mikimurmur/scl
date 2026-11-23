@@ -7,8 +7,8 @@ repository = "https://github.com/Steve-xmh/scl"
 license = "LGPL-3.0-only"
 readme = "README.md"
 authors = ["Steve-xmh <stevexmh@qq.com>"]
-edition = "2021"
-rust-version = "1.75"
+edition = "2024"
+rust-version = "1.88"
 
 [[bin]]
 name = "SharpCraftLauncher"
@@ -18,8 +18,15 @@ path = "src/main.rs"
 scl-core = { path = "../scl-core" }
 scl-gui-widgets = { path = "../scl-gui-widgets" }
 scl-gui-animation = { path = "../scl-gui-animation" }
-scl-macro = { path = "../scl-macro" }
-druid = { git = "https://github.com/linebender/druid.git", features = ["im", "serde", "raw-win-handle"] }
+iced = { version = "0.14", default-features = false, features = [
+    "tiny-skia",
+    "svg",
+    "image",
+    "crisp",
+    "thread-pool",
+    "x11",
+    "wayland",
+] }
 im = { version = "15.1", features = ["serde"] }
 anyhow = "^1.0"
 dirs = "5"
@@ -38,11 +45,8 @@ webbrowser = "^0.8"
 smol = "^2"
 futures = "^0.3"
 shell-words = "^1.0"
-
-[target.'cfg(target_os = "linux")'.dependencies]
-# 原版 Linux 的非致命后台任务错误弹窗使用 GTK MessageDialog；
-# druid 的 GTK 后端已经初始化 GTK，可直接复用同一套 GTK 主循环。
-gtk = "0.18"
+rfd = "^0.15"
+arboard = "^3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 taskbar_interface = { git = "https://github.com/Steve-xmh/taskbar_interface.git" }

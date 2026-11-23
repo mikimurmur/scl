@@ -1,14 +1,13 @@
 //! 启动器内部使用的核心数据结构。
 //!
 //! 这里的数据结构大多和 [`scl_core`] 中的结构一一对应，但是为了能够被
-//! Druid 的数据系统追踪变化，额外实现了 [`druid::Data`] 和 [`druid::Lens`]。
+//! 界面直接使用这些结构体，不再依赖 Druid 的数据系统。
 
-use druid::{Data, Lens};
 use scl_core::{
     auth::structs::AuthMethod as CoreAuthMethod,
     download::DownloadSource as CoreDownloadSource,
     password::Password,
-    version::{structs::SCLLaunchConfig as CoreSCLLaunchConfig, VersionType as CoreVersionType},
+    version::{VersionType as CoreVersionType, structs::SCLLaunchConfig as CoreSCLLaunchConfig},
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +20,7 @@ pub trait CoreTransformer<C>: Sized {
 }
 
 /// 版本类型，和 [`scl_core::version::VersionType`] 对应
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Data, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum VersionType {
     /// 纯净版本
@@ -85,7 +84,7 @@ impl VersionType {
 }
 
 /// 下载源，和 [`scl_core::download::DownloadSource`] 对应
-#[derive(Debug, Clone, PartialEq, Eq, Data, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DownloadSource {
     /// 官方下载源
     #[default]
@@ -204,12 +203,6 @@ pub enum AuthMethod {
         #[serde(default)]
         hat_skin: Vec<u8>,
     },
-}
-
-impl Data for AuthMethod {
-    fn same(&self, other: &Self) -> bool {
-        self == other
-    }
 }
 
 impl AuthMethod {
@@ -422,7 +415,7 @@ impl CoreTransformer<CoreAuthMethod> for AuthMethod {
 }
 
 /// 远端版本信息，对应下载清单中的一项
-#[derive(Debug, Clone, Default, PartialEq, Eq, Data, Lens, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionInfo {
     /// 版本名称
     pub name: String,
@@ -462,7 +455,7 @@ impl CoreTransformer<scl_core::download::structs::VersionInfo> for VersionInfo {
 ///
 /// 这里在 [`scl_core::version::structs::SCLLaunchConfig`] 的基础上增加了少量
 /// 仅在界面上使用的字段。序列化到版本文件夹下的 `.scl.json` 时，这些字段会被忽略。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Data, Lens, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SCLLaunchConfig {
     /// 是否启用独立版本设置
@@ -524,7 +517,7 @@ impl CoreTransformer<CoreSCLLaunchConfig> for SCLLaunchConfig {
 }
 
 /// 一个已经安装的游戏版本
-#[derive(Debug, Clone, Default, PartialEq, Eq, Data, Lens)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LocalVersionInfo {
     /// 版本名称
     pub name: String,

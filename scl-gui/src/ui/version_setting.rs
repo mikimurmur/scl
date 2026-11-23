@@ -1,63 +1,28 @@
 //! 版本设置页面。
 //!
 //! 结构与官方 `ui::version_setting::ui_builder` 对齐：
-//! 标题（固定 40 高）→ 图标/名称输入框/删除/文件夹一行 → 5 条菜单行
+//! 标题 → 图标/名称输入框/删除/文件夹一行 → 5 条菜单行
 //! （独立设置、版本隔离、模组管理、地图管理、资源包管理）→ 底部
 //! 「高级设置」「补全/修复版本文件」两个等宽按钮。
 //! 页面没有「保存设置」按钮：官方在页面弹出时由
 //! `app::version_setting::on_app_pop_page` 异步落盘。
 
-use druid::{
-    widget::{CrossAxisAlignment, Flex, TextBox},
-    Env, LensExt, Target, Widget, WidgetExt,
-};
-use scl_core::version::structs::VersionInfo as CoreVersionInfo;
-use scl_gui_widgets::{
-    theme::{color::typography, icons::IconKeyPair},
-    widgets::{label, Button, Icon, IconButton, MenuItem},
-};
+use iced::widget::{column, container, row, space};
+use iced::{Alignment, Element, Length};
+use scl_gui_widgets::icons;
+use scl_gui_widgets::widgets::{self, ButtonKind};
 
 use crate::{
-    app::FIX_VERSION,
+    app::{FIX_VERSION, Message},
     app_state::AppState,
     core::VersionType,
-    theme::icons::{
-        DELETE, FOLDER, GAME_FABRIC, GAME_FORGE, GAME_NEOFORGE, GAME_OPTIFINE, GAME_QUILTMC,
-        GAME_VANILLA,
-    },
     ui::{
-        PAGE_VERSION_SETTING_ADVANCE, PAGE_VERSION_SETTING_MODS, PAGE_VERSION_SETTING_REMOVE,
-        PUSH_PAGE,
+        BoolField, PAGE_VERSION_SETTING_ADVANCE, PAGE_VERSION_SETTING_MODS,
+        PAGE_VERSION_SETTING_REMOVE, TextField, UiMessage, common,
     },
-    utils::{open_url::open_url, prelude::should_version_independent, thread::thread_main},
 };
 
-/// 版本设置页标题高度，官方 `SizedBox` 固定 40。
-const TITLE_HEIGHT: f64 = 40.;
-/// 标题左右内边距，官方 `Padding((10., 0.))`。
-const TITLE_H_PADDING: f64 = 10.;
-/// 头部一行左右内边距，官方 `Padding((5., 0.))`。
-const HEADER_H_PADDING: f64 = 5.;
-/// 「高级设置」与「补全/修复版本文件」之间的间距。
-const BUTTON_SPACING: f64 = 5.;
-/// 底部按钮行内边距，官方 `Padding(5.)`。
-const BOTTOM_PADDING: f64 = 5.;
-/// 头部一行中图标与输入框之间的间距。
-const HEADER_SPACING: f64 = 5.;
-
-/// 版本类型（界面索引）对应的列表图标，与版本列表页保持一致。
-fn version_type_icon(index: u8) -> IconKeyPair {
-    match version_type_from_index(index) {
-        VersionType::Forge => GAME_FORGE,
-        VersionType::NeoForge => GAME_NEOFORGE,
-        VersionType::Fabric => GAME_FABRIC,
-        VersionType::QuiltMC => GAME_QUILTMC,
-        VersionType::Optifine => GAME_OPTIFINE,
-        VersionType::Vanilla | VersionType::Unknown => GAME_VANILLA,
-    }
-}
-
-/// 把界面使用的数字转换为版本类型
+/// 把界面使用的数字转换为版本类型。
 fn version_type_from_index(index: u8) -> VersionType {
     match index {
         0 => VersionType::Vanilla,
@@ -70,159 +35,129 @@ fn version_type_from_index(index: u8) -> VersionType {
     }
 }
 
-/// 打开当前版本的游戏目录或其中的子目录（saves / resourcepacks）。
-///
-/// 官方在点击回调和底部图标回调里直接发起异步任务：加载 `VersionInfo`，
-/// 没有独立配置时按全局「版本隔离方式」给出有效 `game_independent`，
-/// 再由 `version_path()` 解析出目录；子目录不存在时先创建再打开。
-fn open_version_dir(_ctx: &druid::EventCtx, data: &AppState, sub: Option<&'static str>) {
-    let version_name = data.version_setting_version_name.to_owned();
-    if version_name.is_empty() {
-        return;
-    }
-    let version_base = data.versions_folder();
-    let independence_method = data.config.version_independent_method;
-    thread_main(async move {
-        let mut info = CoreVersionInfo {
-            version_base: version_base.to_string_lossy().to_string(),
-            version: version_name,
-            ..Default::default()
-        };
-        if info.load().await.is_ok() {
-            if info.scl_launch_config.is_none() {
-                let game_independent = should_version_independent(
-                    independence_method,
-                    &info.minecraft_version,
-                    VersionType::from(info.version_type),
-                );
-                info.scl_launch_config = Some(scl_core::version::structs::SCLLaunchConfig {
-                    game_independent,
-                    ..Default::default()
-                });
-            }
-            let mut dir = info.version_path();
-            if let Some(sub) = sub {
-                if sub == "resourcepacks"
-                    && !dir.join("resourcepacks").exists()
-                    && dir.join("texturepacks").exists()
-                {
-                    dir.push("texturepacks");
-                } else {
-                    dir.push(sub);
-                }
-                let _ = smol::fs::create_dir_all(&dir).await;
-            }
-            if let Some(path) = dir.to_str() {
-                let _ = open_url(path);
-            }
-        }
-        Ok(())
-    });
+/// 版本类型（界面索引）对应的列表图标，与版本列表页保持一致。
+fn version_type_icon(index: u8) -> scl_gui_widgets::icons::Icon {
+    crate::ui::version::version_icon(version_type_from_index(index))
 }
 
 /// 创建版本设置页面
-pub fn ui_builder() -> Box<dyn Widget<AppState>> {
-    // 标题：官方固定 40 高，左右各 10 内边距（`Padding((10., 0.))`）。
-    let title = label::new("版本设置")
-        .with_font(typography::TITLE)
-        .fix_height(TITLE_HEIGHT)
-        .padding((TITLE_H_PADDING, 0.));
+pub fn view(state: &AppState) -> Element<'_, Message> {
+    let theme = state.theme;
+    let config = &state.version_setting_config;
 
-    // 版本图标随版本类型变化（官方 `Icon<u8>` 经 lens 绑定 version_setting_version_type）。
-    let version_icon = Icon::<u8>::dynamic(|index: &u8, _: &Env| version_type_icon(*index))
-        .lens(AppState::version_setting_version_type);
+    let title = container(common::title(&theme, "版本设置"))
+        .height(Length::Fixed(40.0))
+        .padding([0, 10]);
 
-    // 版本名称输入框：官方无 placeholder，扩展宽度并作为 1.0 弹性子项。
-    let rename = TextBox::new()
-        .lens(AppState::version_setting_version_name_rename)
-        .expand_width();
+    let rename = common::text_input(
+        &theme,
+        "",
+        &state.version_setting_version_name_rename,
+        move |value| Message::Ui(UiMessage::Text(TextField::VersionRename, value)),
+    );
 
-    // 官方两个图标按钮是无底色的扁平按钮。
-    let delete = IconButton::new(DELETE)
-        .with_flat(true)
-        .on_click(|ctx, _data, _env| {
-            ctx.submit_command(
-                PUSH_PAGE
-                    .with(PAGE_VERSION_SETTING_REMOVE)
-                    .to(Target::Global),
-            );
-        });
-    let folder =
-        IconButton::new(FOLDER)
-            .with_flat(true)
-            .on_click(|ctx, data: &mut AppState, _env| {
-                open_version_dir(ctx, data, None);
-            });
+    let delete = widgets::icon_button(
+        &theme,
+        icons::DELETE,
+        16.0,
+        ButtonKind::Flat,
+        common::command(crate::app::PUSH_PAGE, PAGE_VERSION_SETTING_REMOVE),
+    );
+    let folder = widgets::icon_button(
+        &theme,
+        icons::FOLDER,
+        16.0,
+        ButtonKind::Flat,
+        Message::Ui(UiMessage::OpenVersionDir(None)),
+    );
 
-    let header = Flex::row()
-        .with_child(version_icon)
-        .with_spacer(HEADER_SPACING)
-        .with_flex_child(rename, 1.0)
-        .with_spacer(HEADER_SPACING)
-        .with_child(delete)
-        .with_child(folder)
-        .padding((HEADER_H_PADDING, 0.));
+    let header = row![
+        version_type_icon(state.version_setting_version_type).view_default(&theme, 20.0),
+        space().width(Length::Fixed(5.0)),
+        container(rename).width(Length::Fill),
+        space().width(Length::Fixed(5.0)),
+        delete,
+        folder,
+    ]
+    .align_y(Alignment::Center)
+    .padding([0, 5]);
 
-    let enable = MenuItem::new("使用独立版本设置")
-        .lens(AppState::version_setting_config.then(crate::core::SCLLaunchConfig::enable));
-    let isolation = MenuItem::new("使用版本隔离")
-        .lens(AppState::version_setting_config.then(crate::core::SCLLaunchConfig::game_independent))
-        .disabled_if(|data: &AppState, _: &Env| !data.version_setting_config.enable);
+    let enable = common::menu_toggle(
+        &theme,
+        "使用独立版本设置",
+        config.enable,
+        true,
+        Message::Ui(UiMessage::Bool(BoolField::VersionEnable, !config.enable)),
+    );
+    let isolation = common::menu_toggle(
+        &theme,
+        "使用版本隔离",
+        config.game_independent,
+        config.enable,
+        Message::Ui(UiMessage::Bool(
+            BoolField::VersionIndependent,
+            !config.game_independent,
+        )),
+    );
+    let mods = common::menu_item(
+        &theme,
+        "模组管理",
+        state.version_setting_mods_desc.clone(),
+        true,
+        common::command(crate::app::PUSH_PAGE, PAGE_VERSION_SETTING_MODS),
+    );
+    let maps = common::menu_item(
+        &theme,
+        "地图管理",
+        state.version_setting_maps_desc.clone(),
+        true,
+        Message::Ui(UiMessage::OpenVersionDir(Some("saves"))),
+    );
+    let resource_packs = common::menu_item(
+        &theme,
+        "资源包管理",
+        state.version_setting_resource_packs_desc.clone(),
+        true,
+        Message::Ui(UiMessage::OpenVersionDir(Some("resourcepacks"))),
+    );
 
-    let mods = MenuItem::new("模组管理")
-        .lens(AppState::version_setting_mods_desc)
-        .on_click(|ctx, _data, _env| {
-            ctx.submit_command(PUSH_PAGE.with(PAGE_VERSION_SETTING_MODS).to(Target::Global));
-        });
-    let maps = MenuItem::new("地图管理")
-        .lens(AppState::version_setting_maps_desc)
-        .on_click(|ctx, data: &mut AppState, _env| {
-            open_version_dir(ctx, data, Some("saves"));
-        });
-    let resource_packs = MenuItem::new("资源包管理")
-        .lens(AppState::version_setting_resource_packs_desc)
-        .on_click(|ctx, data: &mut AppState, _env| {
-            open_version_dir(ctx, data, Some("resourcepacks"));
-        });
+    let advance = container(widgets::fill_button_maybe(
+        &theme,
+        "高级设置",
+        ButtonKind::Standard,
+        config.enable.then_some(common::command(
+            crate::app::PUSH_PAGE,
+            PAGE_VERSION_SETTING_ADVANCE,
+        )),
+    ))
+    .width(Length::FillPortion(1));
 
-    // 底部：两个等宽按钮。高级设置在未启用独立设置时禁用（官方 `DisabledIf`）。
-    let advance = Button::new("高级设置")
-        .on_click(|ctx, _data, _env| {
-            ctx.submit_command(
-                PUSH_PAGE
-                    .with(PAGE_VERSION_SETTING_ADVANCE)
-                    .to(Target::Global),
-            );
-        })
-        .disabled_if(|data: &AppState, _: &Env| !data.version_setting_config.enable)
-        .expand_width();
-    let fix = Button::new("补全/修复版本文件")
-        .on_click(|ctx, _data, _env| {
-            ctx.submit_command(FIX_VERSION.with(()).to(Target::Global));
-        })
-        .expand_width();
+    let fix = container(widgets::fill_button(
+        &theme,
+        "补全/修复版本文件",
+        ButtonKind::Standard,
+        common::command(FIX_VERSION, ()),
+    ))
+    .width(Length::FillPortion(1));
 
-    let actions = Flex::row()
-        .cross_axis_alignment(CrossAxisAlignment::Fill)
-        .with_flex_child(advance, 1.0)
-        .with_spacer(BUTTON_SPACING)
-        .with_flex_child(fix, 1.0)
-        .padding(BOTTOM_PADDING);
+    let actions = row![advance, space().width(Length::Fixed(5.0)), fix,]
+        .align_y(Alignment::Center)
+        .padding(5);
 
-    let content = Flex::column()
-        .cross_axis_alignment(CrossAxisAlignment::Fill)
-        .with_child(title)
-        .with_child(header)
-        .with_spacer(HEADER_SPACING)
-        .with_child(enable)
-        .with_child(isolation)
-        .with_child(mods)
-        .with_child(maps)
-        .with_child(resource_packs)
-        .with_flex_spacer(1.0)
-        .with_child(actions)
-        .expand_width()
-        .disabled_if(|data: &AppState, _: &Env| data.starting_tip.is_some());
-
-    Box::new(content)
+    column![
+        title,
+        header,
+        space().height(Length::Fixed(5.0)),
+        enable,
+        isolation,
+        mods,
+        maps,
+        resource_packs,
+        space().height(Length::Fill),
+        actions,
+    ]
+    .spacing(0)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }

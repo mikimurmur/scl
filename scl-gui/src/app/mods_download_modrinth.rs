@@ -1,10 +1,10 @@
 //! Modrinth 模组搜索和文件获取。
 
-use druid::{EventCtx, ExtEventSink, Target};
+use crate::app::{EventCtx, ExtEventSink, Target};
 use scl_core::download::modrinth::{self, SearchParams};
 
 use crate::{
-    app::{AppEvent, APP_EVENT},
+    app::{APP_EVENT, AppEvent},
     app_state::{AppState, ModFileState, ModSource, ModState},
     utils::thread::thread_main,
 };
@@ -106,8 +106,9 @@ fn start_search(ctx: &EventCtx, data: &AppState, page: u64) {
 pub fn apply_search(ctx: &mut EventCtx, data: &mut AppState) {
     data.mods_download_modrinth_page = 1;
     data.mods_download_modrinth_searching = true;
-    data.mods_download_modrinth_search_generation =
-        data.mods_download_modrinth_search_generation.wrapping_add(1);
+    data.mods_download_modrinth_search_generation = data
+        .mods_download_modrinth_search_generation
+        .wrapping_add(1);
     start_search(ctx, data, 1);
 }
 
@@ -118,18 +119,17 @@ pub fn load_more(ctx: &mut EventCtx, data: &mut AppState) {
     }
     data.mods_download_modrinth_page = data.mods_download_modrinth_page.saturating_add(1).max(1);
     data.mods_download_modrinth_searching = true;
-    data.mods_download_modrinth_search_generation =
-        data.mods_download_modrinth_search_generation.wrapping_add(1);
+    data.mods_download_modrinth_search_generation = data
+        .mods_download_modrinth_search_generation
+        .wrapping_add(1);
     start_search(ctx, data, data.mods_download_modrinth_page);
 }
 
 /// 页面打开时自动搜索
 pub fn on_app_push_page(ctx: &mut EventCtx, data: &mut AppState) {
-    if !data.mods_download_modrinth_search_filter.is_empty() {
-        // 程序化清空会触发输入框的「变动即搜索」控制器；抑制该次重复请求，
-        // 由下面的 apply_search 唯一发起默认搜索。
-        crate::ui::mods_download_modrinth::SKIP_NEXT_INPUT_SEARCH
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    // 截图/交互测试使用内置假数据，不做真实网络请求。
+    if std::env::var_os("SCL_MOCK").is_some() {
+        return;
     }
     data.mods_download_modrinth_search_filter.clear();
     data.mods_download_modrinth_page = 1;

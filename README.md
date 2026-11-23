@@ -8,7 +8,7 @@
 
 ![预览图](https://user-images.githubusercontent.com/39523898/208238006-900bd5fe-f9f7-42a9-b726-da829162fbed.png)
 
-![MSRV 1.75.0](https://img.shields.io/badge/MSRV-1.75.0-orange)
+![MSRV 1.88.0](https://img.shields.io/badge/MSRV-1.88.0-orange)
 
 使用 Rust 编程语言编写，内存占用相当之小，性能相当之优秀，针对二进制大小做了力所能及的压缩优化。
 
@@ -27,8 +27,8 @@
 - `scl-webview`: [![](https://img.shields.io/badge/docs-passing-green)](https://steve-xmh.github.io/scl/scl-doc/scl_webview/index.html) 启动器 WebView 网页浏览器库，提供了用于微软正版登录的浏览器窗口
 - `scl-macro`: [![](https://img.shields.io/badge/docs-passing-green)](https://steve-xmh.github.io/scl/scl-doc/scl_macro/index.html) 启动器过程宏库，包含了部分用于代码生成的过程宏代码，目前包含图标代码生成的简易过程宏
 - `scl-gui-animation`: [![](https://img.shields.io/badge/docs-passing-green)](https://steve-xmh.github.io/scl/scl-doc/scl_gui_animation/index.html) 启动器图形页面动画函数库，包含了一些方便用来制作非线性动画的函数和工具类
-- `scl-gui-widgets`: [![](https://img.shields.io/badge/docs-passing-green)](https://steve-xmh.github.io/scl/scl-doc/scl_gui_widgets/index.html) 启动器图形页面组件库，基于 [Druid](https://github.com/linebender/druid) 框架，提供了大量基于 WinUI3 设计规范制作的图形页面组件
-- `scl-gui-iced`: 启动器图形页面组件库的 [Iced](https://iced.rs)（tiny-skia）迁移实验，与基于 Druid 的 `scl-gui-widgets` 并行存在，详见 [scl-gui-iced/README.md](./scl-gui-iced/README.md)
+- `scl-gui-widgets`: [![](https://img.shields.io/badge/docs-passing-green)](https://steve-xmh.github.io/scl/scl-doc/scl_gui_widgets/index.html) 启动器图形页面组件库，基于 [Iced](https://iced.rs) 0.14（tiny-skia 渲染后端），提供了大量基于 WinUI3 设计规范制作的图形页面组件
+- `scl-gui`: 启动器本体，基于 `scl-gui-widgets` 构建页面、主题和后台业务交互
 
 ## 关于开源协议和代码协作协议
 
@@ -65,11 +65,11 @@
 - [x] 多 .minecraft 文件夹
 - [x] MacOS 支持
 - [ ] 代码结构优化（目前代码还是很乱，命名也不太规范）
-- [ ] 可视化主题设置（因 Druid 的内存泄露 BUG 无期限推迟此功能）
+- [ ] 可视化主题设置（旧 Druid 版本因内存泄露 BUG 推迟，Iced 版本可继续推进）
 
 ### 2.0 计划表
 
-- [ ] 移植 UI 到 FLTK-RS
+- [x] 使用 Iced（tiny-skia 渲染后端）重构 UI
 - [ ] Linux 使用 MUSL 编译
 - [ ] Linux 只留一个 Webkit2GTK 依赖或做成动态导入
 - [ ] 可视化主题设置

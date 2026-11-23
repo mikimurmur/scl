@@ -1,166 +1,177 @@
 //! 账户管理页面。
 
-use druid::{
-    piet::{Text, TextLayoutBuilder},
-    widget::{CrossAxisAlignment, Flex, List, Scroll},
-    BoxConstraints, Env, Event, EventCtx, LayoutCtx, Lens, LifeCycle, LifeCycleCtx, PaintCtx,
-    RenderContext, Size, Target, Widget, WidgetExt,
-};
-use im::Vector;
-use scl_gui_widgets::theme::color::{base, list, typography};
+use iced::widget::{button as iced_button, column, container, row, space};
+use iced::{Alignment, Background, Border, Element, Length};
+use scl_gui_widgets::icons;
+use scl_gui_widgets::theme::Theme;
+use scl_gui_widgets::widgets::ButtonKind;
 
 use crate::{
+    app::{DELETE_AUTH, Message, SWITCH_AUTH},
     app_state::AppState,
-    ui::{common, PAGE_LOGIN_METHODS, PUSH_PAGE},
-    widgets::account_item::{AccountItem, AccountItemData},
+    core::AuthMethod,
+    ui::{PAGE_LOGIN_METHODS, TextField, UiMessage, common},
 };
 
-/// 根据搜索关键词过滤账户列表
-pub struct AccountsLens;
-
-impl Lens<AppState, Vector<AccountItemData>> for AccountsLens {
-    fn with<V, F: FnOnce(&Vector<AccountItemData>) -> V>(&self, data: &AppState, f: F) -> V {
-        let filter = data.accounts_filter.trim().to_lowercase();
-        let selected = data.config.accounts_data.selected;
-        let accounts: Vector<AccountItemData> = data
-            .config
-            .accounts_data
-            .accounts
-            .iter()
-            .enumerate()
-            .filter(|(_, account)| {
-                filter.is_empty()
-                    || account.player_name().to_lowercase().contains(&filter)
-                    || account.type_name().to_lowercase().contains(&filter)
-            })
-            .map(|(index, account)| (index == selected, index, account.clone()))
-            .collect();
-        f(&accounts)
-    }
-
-    fn with_mut<V, F: FnOnce(&mut Vector<AccountItemData>) -> V>(
-        &self,
-        data: &mut AppState,
-        f: F,
-    ) -> V {
-        let selected = data.config.accounts_data.selected;
-        let mut accounts: Vector<AccountItemData> = data
-            .config
-            .accounts_data
-            .accounts
-            .iter()
-            .enumerate()
-            .map(|(index, account)| (index == selected, index, account.clone()))
-            .collect();
-        f(&mut accounts)
-    }
+fn selection_dot<'a>(theme: &Theme, selected: bool) -> Element<'a, Message> {
+    let theme = *theme;
+    container(space())
+        .width(Length::Fixed(20.0))
+        .height(Length::Fixed(20.0))
+        .style(move |_| iced::widget::container::Style {
+            background: Some(Background::Color(if selected {
+                theme.alt.high
+            } else {
+                theme.base.low
+            })),
+            border: Border {
+                radius: 10.0.into(),
+                width: if selected { 5.0 } else { 1.0 },
+                color: if selected {
+                    theme.main.primary
+                } else {
+                    theme.base.medium
+                },
+            },
+            ..iced::widget::container::Style::default()
+        })
+        .into()
 }
 
-/// “创建新账户”列表项
-struct CreateAccountItem;
+fn account_row<'a>(
+    theme: &Theme,
+    index: usize,
+    selected: bool,
+    account: &AuthMethod,
+) -> Element<'a, Message> {
+    let theme = *theme;
+    let head = common::head_with_hat(&theme, account.head_skin(), account.hat_skin(), 40.0);
 
-impl Widget<AppState> for CreateAccountItem {
-    fn event(&mut self, ctx: &mut EventCtx, event: &Event, _data: &mut AppState, _env: &Env) {
-        match event {
-            Event::MouseDown(_) => {
-                ctx.set_active(true);
-                ctx.request_paint();
-            }
-            Event::MouseUp(_) if ctx.is_active() => {
-                ctx.set_active(false);
-                ctx.request_paint();
-                ctx.submit_command(PUSH_PAGE.with(PAGE_LOGIN_METHODS).to(Target::Global));
-            }
-            _ => {}
-        }
-    }
+    let labels = column![
+        iced::widget::text(account.display_name())
+            .size(13.0)
+            .font(theme.typography.base.font)
+            .color(theme.font_color),
+        iced::widget::text(account.type_name())
+            .size(11.0)
+            .font(theme.typography.caption.font)
+            .color(theme.font_color),
+    ]
+    .spacing(2);
 
-    fn lifecycle(
-        &mut self,
-        ctx: &mut LifeCycleCtx,
-        event: &LifeCycle,
-        _data: &AppState,
-        _env: &Env,
-    ) {
-        if let LifeCycle::HotChanged(_) = event {
-            ctx.request_paint();
-        }
-    }
+    let main_content = row![
+        selection_dot(&theme, selected),
+        space().width(Length::Fixed(8.0)),
+        head,
+        space().width(Length::Fixed(8.0)),
+        labels,
+        space().width(Length::Fill),
+    ]
+    .align_y(Alignment::Center)
+    .padding([0, 8]);
 
-    fn update(&mut self, _: &mut druid::UpdateCtx, _old: &AppState, _new: &AppState, _env: &Env) {}
-
-    fn layout(
-        &mut self,
-        _: &mut LayoutCtx,
-        bc: &BoxConstraints,
-        _data: &AppState,
-        _env: &Env,
-    ) -> Size {
-        bc.constrain(Size::new(bc.max().width, 50.))
-    }
-
-    fn paint(&mut self, ctx: &mut PaintCtx, _data: &AppState, env: &Env) {
-        let size = ctx.size();
-        // 原版 CreateItem 只在悬停/按下时绘制背景，视频中的灰色创建行正是鼠标悬停状态。
-        if ctx.is_hot() {
-            let bg = if ctx.is_active() {
-                env.get(base::LOW)
-            } else {
-                env.get(list::LIST_LOW)
+    let main = iced_button(main_content)
+        .width(Length::Fill)
+        .height(Length::Fixed(50.0))
+        .padding(0)
+        .style(move |_, status| {
+            let background = match status {
+                iced::widget::button::Status::Hovered => theme.list.low,
+                iced::widget::button::Status::Pressed => theme.base.low,
+                _ if selected => theme.list.accent_high,
+                _ => iced::Color::TRANSPARENT,
             };
-            ctx.fill(size.to_rect(), &bg);
-        }
+            iced::widget::button::Style {
+                background: Some(Background::Color(background)),
+                text_color: theme.font_color,
+                border: Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: true,
+            }
+        })
+        .on_press(common::command(SWITCH_AUTH, index));
 
-        let font_color = env.get(typography::FONT_COLOR);
-        let path = druid::kurbo::BezPath::new();
-        let mut path = path;
-        path.move_to((26., 13.));
-        path.line_to((26., 37.));
-        path.move_to((14., 25.));
-        path.line_to((38., 25.));
-        ctx.stroke(&path, &font_color, 4.);
+    let delete = scl_gui_widgets::widgets::icon_button(
+        &theme,
+        icons::DELETE,
+        16.0,
+        ButtonKind::Flat,
+        common::command(DELETE_AUTH, index),
+    );
 
-        if let Ok(layout) = ctx
-            .text()
-            .new_text_layout("创建新账户")
-            .font(env.get(typography::BASE).family, 13.)
-            .text_color(font_color)
-            .build()
-        {
-            ctx.draw_text(&layout, (50., 17.));
-        }
-    }
+    row![main, delete]
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .into()
+}
+
+fn create_account_row<'a>(theme: &Theme) -> Element<'a, Message> {
+    let theme = *theme;
+    let content = row![
+        icons::ADD.view_default(&theme, 22.0),
+        iced::widget::text("创建新账户")
+            .size(13.0)
+            .font(theme.typography.base.font)
+            .color(theme.font_color),
+    ]
+    .spacing(16)
+    .align_y(Alignment::Center)
+    .padding([0, 14]);
+
+    iced_button(content)
+        .width(Length::Fill)
+        .height(Length::Fixed(50.0))
+        .padding(0)
+        .style(move |_, status| {
+            let background = match status {
+                iced::widget::button::Status::Hovered => theme.list.low,
+                iced::widget::button::Status::Pressed => theme.base.low,
+                _ => iced::Color::TRANSPARENT,
+            };
+            iced::widget::button::Style {
+                background: Some(Background::Color(background)),
+                text_color: theme.font_color,
+                border: Border::default(),
+                shadow: iced::Shadow::default(),
+                snap: true,
+            }
+        })
+        .on_press(common::command(crate::app::PUSH_PAGE, PAGE_LOGIN_METHODS))
+        .into()
 }
 
 /// 创建账户管理页面
-pub fn ui_builder() -> Box<dyn Widget<AppState>> {
-    // 原版只有搜索框左右各留 8 像素，账户列表和“创建新账户”行铺满整个窗口。
-    let search = common::text_box("搜索账户……")
-        .lens(AppState::accounts_filter)
-        .expand_width()
-        .padding(druid::Insets::new(8., 0., 8., 0.));
+pub fn view(state: &AppState) -> Element<'_, Message> {
+    let theme = state.theme;
+    let filter = state.accounts_filter.trim().to_lowercase();
+    let selected = state.config.accounts_data.selected;
 
-    let list = List::new(AccountItem::new)
-        .lens(AccountsLens)
-        .expand_width();
+    let search = common::text_input(
+        &theme,
+        "搜索账户……",
+        &state.accounts_filter,
+        move |value| Message::Ui(UiMessage::Text(TextField::AccountsFilter, value)),
+    );
 
-    let scroll = Scroll::new(
-        Flex::column()
-            .cross_axis_alignment(CrossAxisAlignment::Fill)
-            .with_child(list)
-            .with_child(CreateAccountItem),
-    )
-    .vertical()
-    .expand();
+    let mut list = column![].spacing(0);
+    for (index, account) in state.config.accounts_data.accounts.iter().enumerate() {
+        if !filter.is_empty()
+            && !account.player_name().to_lowercase().contains(&filter)
+            && !account.type_name().to_lowercase().contains(&filter)
+        {
+            continue;
+        }
+        list = list.push(account_row(&theme, index, index == selected, account));
+    }
+    list = list.push(create_account_row(&theme));
 
-    Box::new(
-        Flex::column()
-            .cross_axis_alignment(CrossAxisAlignment::Fill)
-            .with_child(search)
-            .with_spacer(8.)
-            .with_flex_child(scroll, 1.0)
-            .padding(druid::Insets::new(0., 8., 0., 8.))
-            .expand(),
-    )
+    column![
+        container(search).padding([8, 8]),
+        space().height(Length::Fixed(8.0)),
+        container(common::scroll(&theme, list)).height(Length::Fill),
+    ]
+    .padding([0, 8])
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
-

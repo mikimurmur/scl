@@ -10,12 +10,8 @@ mod panic;
 mod theme;
 mod ui;
 mod utils;
-mod widgets;
 
-use druid::{AppLauncher, Color, Env, Insets, Size, WindowDesc};
-use scl_gui_widgets::theme::color::{self, accent, main, Theme};
-
-use crate::{app_state::AppState, config::Config, theme::icons::set_icon_to_env};
+use iced::Size;
 
 /// 把 tracing 的根 target 从可执行目标名改成原版 crate 名。
 fn rewrite_log_target(target: &str) -> std::borrow::Cow<'_, str> {
@@ -140,7 +136,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     //（登录钩子 → update_or_create_auth → save → $HOME/.scl/auth_data.json）。
     ensure_e2e_home_isolated();
 
-    // Windows 下从命令行启动时，把日志输出接到父控制台
     #[cfg(target_os = "windows")]
     let console = utils::console::attach_parent_console();
 
@@ -185,167 +180,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("构建日期： {}", env!("SCL_BUILD_DATE"));
     tracing::info!("正在初始化");
 
-    // GTK 的辅助功能桥在 at-spi bus 不存在时会为每个进程打印一条
-    // `dbind-WARNING: Couldn't connect/register with accessibility bus`。
-    // 这里只在检测不到 bus 时关闭辅助功能桥，其它 GTK 警告仍会正常输出。
-    disable_accessibility_bridge_if_unavailable();
-
     tracing::info!("正在初始化恐慌回调");
     panic::install();
     tracing::info!("正在创建窗口");
 
-    let mut config = match config::get_config_sync() {
-        Ok(config) => config,
-        Err(err) => {
-            tracing::error!("读取配置文件失败，将使用默认配置：{err:?}");
-            config::Config::default()
-        }
+    let height = if std::env::var_os("SCL_MOCK_TALL").is_some() {
+        1000.0
+    } else {
+        420.0
     };
-    // 启动顺序：先读 ./.scl.json，再用 ~/.scl/auth_data.json 覆盖账户数据；
-    // auth 文件存在即以它为准。
-    config::apply_auth_override(&mut config, config::load_auth_data());
-    tracing::info!("正在初始化数据状态");
-    let first_run = !config::config_path().exists();
-    let mut state = AppState::new(config);
-    state.first_run = first_run;
-    if std::env::var_os("SCL_MOCK").is_some() {
-        app_state::apply_mock(&mut state);
-    }
 
     tracing::info!("正在启动后台线程");
     utils::thread::ensure_background_thread();
-    tracing::info!("创建窗口中");
 
-    AppLauncher::with_window(gen_win())
-        .configure_env(|env, state| config_env(&state.config, env))
-        .launch(state)?;
+    iced::application(
+        app::AppWrapper::boot,
+        app::AppWrapper::update,
+        app::AppWrapper::view,
+    )
+    .title("Sharp Craft Launcher")
+    .theme(app::AppWrapper::theme)
+    .subscription(app::AppWrapper::subscription)
+    .window(iced::window::Settings {
+        size: Size::new(300.0, height),
+        min_size: Some(Size::new(300.0, 300.0)),
+        resizable: false,
+        decorations: false,
+        transparent: false,
+        exit_on_close_request: false,
+        ..iced::window::Settings::default()
+    })
+    .exit_on_close_request(false)
+    .run()?;
 
     tracing::info!("退出中");
     Ok(())
-}
-
-/// 生成主窗口
-fn gen_win() -> WindowDesc<AppState> {
-    let height = if std::env::var_os("SCL_MOCK_TALL").is_some() {
-        1000.
-    } else {
-        420.
-    };
-    WindowDesc::new(ui::root())
-        .title("Sharp Craft Launcher")
-        .window_size(Size::new(300., height))
-        .with_min_size(Size::new(300., 300.))
-        // 固定窗口且不显示标题栏，因此 KWin/GTK 标题栏不提供最大化按钮。
-        .resizable(false)
-        .show_titlebar(false)
-}
-
-/// 在 at-spi 辅助功能总线不可用时关闭 GTK 的辅助功能桥
-///
-/// GTK 在启动时会尝试向 `$XDG_RUNTIME_DIR/at-spi/bus_0` 注册，失败时通过
-/// `dbind` 打印 `Gtk-WARNING`/`dbind-WARNING`。这里只在该 socket 确实不存在时
-/// 设置 `NO_AT_BRIDGE=1`，不会屏蔽其它 GTK 警告。
-#[cfg(unix)]
-fn disable_accessibility_bridge_if_unavailable() {
-    if std::env::var_os("NO_AT_BRIDGE").is_some() || std::env::var_os("GTK_A11Y").is_some() {
-        return;
-    }
-    // 即使 socket 文件存在，at-spi 也可能没有响应并让 GTK 打印同样的
-    // dbind-WARNING；启动器不需要辅助功能树，因此直接关闭该桥。
-    std::env::set_var("NO_AT_BRIDGE", "1");
-}
-
-#[cfg(not(unix))]
-fn disable_accessibility_bridge_if_unavailable() {}
-
-/// 根据配置设置 Druid 的环境
-pub(crate) fn config_env(config: &Config, env: &mut Env) {
-    let theme = if config.theme.dark_theme {
-        Theme::Dark
-    } else {
-        Theme::Light
-    };
-    color::set_color_to_env(env, theme);
-    set_icon_to_env(env, &config.theme.icons_theme);
-    set_env_color(config, env);
-}
-
-/// 应用自定义的主题颜色并补齐 Druid 自带控件使用的主题变量
-fn set_env_color(config: &Config, env: &mut Env) {
-    // v1.2.0 的默认主题以品牌橙色作为强调色。`scl-gui-widgets` 中保留的
-    // 蓝色 Fluent 强调色只作为库的默认值，启动器需要在没有自定义颜色时覆盖掉。
-    let default_accent = Color::Rgba32(0xF74C00FF);
-    let default_accent_light = Color::Rgba32(0xFF7233FF);
-    let default_accent_dark = Color::Rgba32(0xD24100FF);
-    env.set(accent::ACCENT, default_accent);
-    env.set(accent::ACCENT_1, default_accent_light);
-    env.set(accent::ACCENT_DARK_1, default_accent_dark);
-    env.set(accent::ACCENT_LIGHT_1, default_accent_light);
-
-    if let Some(color) = config.theme.theme_color_secondary {
-        env.set(main::SECONDARY, color);
-    }
-    if let Some(color) = config.theme.theme_color_primary {
-        env.set(main::PRIMARY, color);
-    }
-    if let Some(color) = config.theme.theme_color_accent {
-        env.set(accent::ACCENT, color);
-    }
-    if let Some(color) = config.theme.theme_color_accent_1 {
-        env.set(accent::ACCENT_1, color);
-    }
-    if let Some(color) = config.theme.theme_color_accent_dark_1 {
-        env.set(accent::ACCENT_DARK_1, color);
-    }
-    if let Some(color) = config.theme.theme_color_accent_light_1 {
-        env.set(accent::ACCENT_LIGHT_1, color);
-    }
-    if let Some(color) = config.theme.theme_color_title_bar {
-        env.set(main::TITLE_BAR, color);
-    }
-    if let Some(color) = config.theme.theme_color_background {
-        env.set(druid::theme::WINDOW_BACKGROUND_COLOR, color);
-    }
-
-    env.set(druid::theme::SCROLLBAR_WIDTH, 2.0);
-    env.set(druid::theme::SCROLLBAR_COLOR, Color::Rgba32(0x7A7A7AFF));
-    env.set(
-        druid::theme::SCROLLBAR_BORDER_COLOR,
-        Color::Rgba32(0x7A7A7AFF),
-    );
-    env.set(druid::theme::BUTTON_BORDER_RADIUS, 2.0);
-    env.set(druid::theme::BUTTON_BORDER_WIDTH, 0.0);
-    env.set(druid::theme::BUTTON_DARK, Color::Rgba32(0xC6C6C6FF));
-    env.set(druid::theme::BUTTON_LIGHT, Color::Rgba32(0xE0E0E0FF));
-    env.set(
-        druid::theme::TEXT_COLOR,
-        env.get(scl_gui_widgets::theme::color::base::HIGH),
-    );
-    env.set(druid::theme::TEXTBOX_INSETS, Insets::new(12., 6., 12., 6.));
-    env.set(druid::theme::PRIMARY_LIGHT, default_accent);
-    env.set(druid::theme::PRIMARY_DARK, default_accent);
-    env.set(druid::theme::FOREGROUND_LIGHT, default_accent);
-    env.set(druid::theme::FOREGROUND_DARK, default_accent);
-    env.set(
-        druid::theme::BACKGROUND_LIGHT,
-        env.get(scl_gui_widgets::theme::color::alt::HIGH),
-    );
-    env.set(
-        druid::theme::BACKGROUND_DARK,
-        env.get(scl_gui_widgets::theme::color::alt::HIGH),
-    );
-    env.set(
-        druid::theme::PLACEHOLDER_COLOR,
-        druid::Color::rgb8(0x80, 0x80, 0x80),
-    );
-    env.set(
-        druid::theme::SELECTED_TEXT_BACKGROUND_COLOR,
-        env.get(accent::ACCENT),
-    );
-    env.set(
-        druid::theme::CURSOR_COLOR,
-        env.get(scl_gui_widgets::theme::color::base::HIGH),
-    );
-    env.set(druid::theme::TEXTBOX_BORDER_WIDTH, 1.0);
-    env.set(druid::theme::TEXTBOX_BORDER_RADIUS, 4.0);
 }

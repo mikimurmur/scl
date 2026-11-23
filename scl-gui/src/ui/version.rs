@@ -1,50 +1,41 @@
 //! 已安装版本列表页面。
 
-use druid::{
-    widget::{CrossAxisAlignment, Flex, List, Scroll, TextBox, ViewSwitcher},
-    Env, Insets, Lens, Target, Widget, WidgetExt,
-};
+use iced::widget::{column, container, row, space};
+use iced::{Alignment, Element, Length};
 use im::Vector;
-use scl_gui_widgets::{
-    theme::{color::typography, icons::IconKeyPair},
-    widgets::{label, Button, IconButton, ListItem},
-};
+use scl_gui_widgets::icons::{self, Icon};
+use scl_gui_widgets::theme::Theme;
+use scl_gui_widgets::widgets::ButtonKind;
 
 use crate::{
-    app::{SELECT_VERSION, SELECT_VERSION_SETTING},
+    app::{Message, SELECT_VERSION, SELECT_VERSION_SETTING},
     app_state::{AppState, LocalVersionInfo},
     core::VersionType,
-    theme::icons::{
-        CATEGORIED_BY_VERSION_TYPE, FOLDER, GAME_FABRIC, GAME_FORGE, GAME_NEOFORGE, GAME_OPTIFINE,
-        GAME_QUILTMC, GAME_VANILLA, SORT_BY_DOWNLOAD_DATE, SORT_BY_NAME,
-        SORT_BY_VERSION_RELEASE_DATE,
+    ui::{
+        PAGE_DOWNLOAD, PAGE_GAME_DIR,
+        UiMessage::{Text, ToggleSort},
+        common,
     },
-    ui::{PAGE_DOWNLOAD, PAGE_GAME_DIR, PUSH_PAGE},
 };
 
 /// 根据版本类型返回列表中显示的图标
-fn version_icon(data: &LocalVersionInfo, _env: &Env) -> IconKeyPair {
-    match data.version_type {
-        VersionType::Vanilla | VersionType::Unknown => GAME_VANILLA,
-        VersionType::Forge => GAME_FORGE,
-        VersionType::NeoForge => GAME_NEOFORGE,
-        VersionType::Fabric => GAME_FABRIC,
-        VersionType::QuiltMC => GAME_QUILTMC,
-        VersionType::Optifine => GAME_OPTIFINE,
+pub fn version_icon(version_type: VersionType) -> Icon {
+    match version_type {
+        VersionType::Vanilla | VersionType::Unknown => icons::GAME_VANILLA,
+        VersionType::Forge => icons::GAME_FORGE,
+        VersionType::NeoForge => icons::GAME_NEOFORGE,
+        VersionType::Fabric => icons::GAME_FABRIC,
+        VersionType::QuiltMC => icons::GAME_QUILTMC,
+        VersionType::Optifine => icons::GAME_OPTIFINE,
     }
 }
 
-/// 排序按钮当前对应的图标
-///
-/// 原版按「名称 → 版本发布时间 → 下载时间 → 按版本类型分类」循环，共 4 种模式
-/// （0~3，初始为 0）。模式 1 的图标虽是「版本发布时间」，但官方该档未实现时间序，
-/// 实际结果与模式 0 相同（见 [`sort_versions`]）。
-fn sort_icon(data: &AppState, _env: &Env) -> IconKeyPair {
-    match data.versions_sort_mode {
-        1 => SORT_BY_VERSION_RELEASE_DATE,
-        2 => SORT_BY_DOWNLOAD_DATE,
-        3 => CATEGORIED_BY_VERSION_TYPE,
-        _ => SORT_BY_NAME,
+fn sort_icon(mode: u8) -> Icon {
+    match mode {
+        1 => icons::SORT_BY_VERSION_RELEASE_DATE,
+        2 => icons::SORT_BY_DOWNLOAD_DATE,
+        3 => icons::CATEGORIED_BY_VERSION_TYPE,
+        _ => icons::SORT_BY_NAME,
     }
 }
 
@@ -61,8 +52,6 @@ fn version_type_rank(version_type: VersionType) -> u8 {
 }
 
 fn sort_with_options(data: &AppState) -> Vector<LocalVersionInfo> {
-    // 原版 `SearchVersionLens` 直接对名称调用 `str::contains`，没有转小写；
-    // 因此这里的搜索与排序名称比较都保持大小写敏感。
     let filter = data.versions_search_filter.as_str();
     let versions: Vector<LocalVersionInfo> = data
         .versions
@@ -75,7 +64,6 @@ fn sort_with_options(data: &AppState) -> Vector<LocalVersionInfo> {
 
 fn sort_versions(mut versions: Vector<LocalVersionInfo>, mode: u8) -> Vector<LocalVersionInfo> {
     match mode {
-        // 模式 0 与模式 1 结果相同：官方模式 1 未实现时间序（OB-14）。
         0 | 1 => versions.sort_by(|a, b| a.name.cmp(&b.name)),
         2 => versions.sort_by(|a, b| {
             b.created_date
@@ -92,140 +80,125 @@ fn sort_versions(mut versions: Vector<LocalVersionInfo>, mode: u8) -> Vector<Loc
     versions
 }
 
-/// 根据搜索关键词过滤并排序版本列表
-pub struct SearchVersionLens;
-
-impl Lens<AppState, Vector<LocalVersionInfo>> for SearchVersionLens {
-    fn with<V, F: FnOnce(&Vector<LocalVersionInfo>) -> V>(&self, data: &AppState, f: F) -> V {
-        f(&sort_with_options(data))
-    }
-
-    fn with_mut<V, F: FnOnce(&mut Vector<LocalVersionInfo>) -> V>(
-        &self,
-        data: &mut AppState,
-        f: F,
-    ) -> V {
-        f(&mut sort_with_options(data))
-    }
-}
-
-/// 版本列表中的一行
-///
-/// 与官方 `ui::version` 的控件组合一致：`Flex::row` 内放置
-/// `IconButton<VersionState>`（点击打开版本设置页）与
-/// `ListItem<VersionState>`（点击选择版本并回主页）。
-/// 官方图标按钮为 32px，名称区为 `ListItem`（32px 高），
-/// 行上下各留 2px（行间距 36px），列表内容左右各 8px。
-fn version_item() -> impl Widget<LocalVersionInfo> {
-    Flex::row()
-        .with_child(IconButton::dynamic(version_icon).with_flat(true).on_click(
-            |ctx, data: &mut LocalVersionInfo, _env| {
-                // 官方入口：点击版本图标异步加载该版本配置并推入
-                ctx.submit_command(
-                    SELECT_VERSION_SETTING
-                        .with(data.name.clone())
-                        .to(Target::Global),
-                );
-            },
-        ))
-        .with_spacer(4.)
-        .with_flex_child(
-            ListItem::dynamic(|data: &LocalVersionInfo, _env| data.name.clone())
-                .on_click(|ctx, data: &mut LocalVersionInfo, _env| {
-                    ctx.submit_command(SELECT_VERSION.with(data.name.clone()).to(Target::Global));
-                })
-                // 本地 druid 的 Flex 不会把弹性子项拉满，需显式扩展宽度才能
-                // 与官方一致：名称区覆盖图标右侧整行，悬停/点击都生效。
-                .expand_width(),
-            1.0,
-        )
-        .padding(Insets::new(0., 2., 0., 2.))
-}
-
-/// 没有版本时显示的空状态
-fn empty_state() -> Box<dyn Widget<AppState>> {
-    Box::new(
-        Flex::column()
-            .cross_axis_alignment(CrossAxisAlignment::Fill)
-            .with_flex_spacer(1.0)
-            .with_child(
-                label::new("没有找到任何版本，请检查当前目录是否存在游戏\n如果确实没有下载游戏的话，要不要现在来下载一个呢？")
-                    .with_font(typography::CAPTION)
-                    .with_text_color(typography::FONT_COLOR)
-                    .padding(4.),
+fn empty_state<'a>(theme: &Theme) -> Element<'a, Message> {
+    container(
+        column![
+            iced::widget::text(
+                "没有找到任何版本，请检查当前目录是否存在游戏\n如果确实没有下载游戏的话，要不要现在来下载一个呢？"
             )
-            .with_spacer(32.)
-            .with_child(
-                Button::new("带我下载游戏吧！")
-                    .with_accent(true)
-                    .on_click(|ctx, _data, _env| {
-                        ctx.submit_command(PUSH_PAGE.with(PAGE_DOWNLOAD).to(Target::Global));
-                    }),
-            )
-            .with_spacer(4.)
-            .with_child(Button::new("切换游戏目录").on_click(|ctx, _data, _env| {
-                ctx.submit_command(PUSH_PAGE.with(PAGE_GAME_DIR).to(Target::Global));
-            }))
-            .with_flex_spacer(1.0)
-            .padding(4.),
-    )
-}
-
-/// 有版本时显示的列表页面
-fn version_list_page() -> Box<dyn Widget<AppState>> {
-    let sort = IconButton::dynamic(sort_icon).with_accent(true).on_click(
-        |_ctx, data: &mut AppState, _env| {
-            // 官方循环顺序：0 → 1 → 2 → 3 → 0。
-            data.versions_sort_mode = match data.versions_sort_mode {
-                0 => 1,
-                1 => 2,
-                2 => 3,
-                _ => 0,
-            };
-        },
-    );
-    let folder = IconButton::new(FOLDER).on_click(|ctx, _data, _env| {
-        ctx.submit_command(PUSH_PAGE.with(PAGE_GAME_DIR).to(Target::Global));
-    });
-    let search = TextBox::new()
-        .with_placeholder("搜索……")
-        .lens(AppState::versions_search_filter)
-        .expand_width();
-
-    let toolbar = Flex::row()
-        .cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_child(sort)
-        .with_spacer(4.)
-        .with_flex_child(search, 1.0)
-        .with_spacer(4.)
-        .with_child(folder)
-        .padding(Insets::new(8., 8., 8., 5.83));
-
-    let list = List::new(version_item).lens(SearchVersionLens);
-
-    Box::new(
-        Flex::column()
-            .cross_axis_alignment(CrossAxisAlignment::Fill)
-            .with_child(toolbar)
-            .with_flex_child(
-                Scroll::new(list.padding(Insets::new(8., 0., 8., 0.))).vertical(),
-                1.0,
+            .size(theme.typography.caption.size)
+            .font(theme.typography.caption.font)
+            .color(theme.font_color),
+            space().height(Length::Fixed(24.0)),
+            common::accent_button(
+                theme,
+                "带我下载游戏吧！",
+                common::command(crate::app::PUSH_PAGE, PAGE_DOWNLOAD),
             ),
+            common::button(
+                theme,
+                "切换游戏目录",
+                ButtonKind::Standard,
+                common::command(crate::app::PUSH_PAGE, PAGE_GAME_DIR),
+            ),
+        ]
+        .spacing(8)
+        .align_x(Alignment::Center),
     )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x(Length::Fill)
+    .center_y(Length::Fill)
+    .padding(12)
+    .into()
+}
+
+fn version_list_page<'a>(state: &AppState, theme: &Theme) -> Element<'a, Message> {
+    let sort_button = scl_gui_widgets::widgets::icon_button(
+        theme,
+        sort_icon(state.versions_sort_mode),
+        18.0,
+        ButtonKind::Accent,
+        Message::Ui(ToggleSort),
+    );
+
+    let folder = scl_gui_widgets::widgets::icon_button(
+        theme,
+        icons::FOLDER,
+        18.0,
+        ButtonKind::Standard,
+        common::command(crate::app::PUSH_PAGE, PAGE_GAME_DIR),
+    );
+
+    let search = common::text_input(
+        theme,
+        "搜索……",
+        &state.versions_search_filter,
+        move |value| Message::Ui(Text(crate::ui::TextField::VersionsFilter, value)),
+    );
+
+    let toolbar = container(
+        row![
+            sort_button,
+            space().width(Length::Fixed(4.0)),
+            container(search).width(Length::Fill),
+            space().width(Length::Fixed(4.0)),
+            folder,
+        ]
+        .align_y(Alignment::Center),
+    )
+    .padding([8, 8]);
+
+    let mut list = column![].spacing(0);
+
+    for version in sort_with_options(state) {
+        let icon = version_icon(version.version_type);
+        let setting_message = common::command(SELECT_VERSION_SETTING, version.name.clone());
+        let select_message = common::command(SELECT_VERSION, version.name.clone());
+
+        let icon_button = scl_gui_widgets::widgets::icon_button(
+            &state.theme,
+            icon,
+            20.0,
+            ButtonKind::Flat,
+            setting_message,
+        );
+
+        let row = row![
+            icon_button,
+            space().width(Length::Fixed(4.0)),
+            common::list_item(
+                &state.theme,
+                None,
+                version.name.clone(),
+                None,
+                false,
+                Some(select_message)
+            ),
+        ]
+        .align_y(Alignment::Center)
+        .padding([2, 0]);
+
+        list = list.push(row);
+    }
+
+    column![
+        toolbar,
+        container(common::scroll(theme, container(list).padding([0, 8]))).height(Length::Fill),
+    ]
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// 创建版本列表页面
-pub fn ui_builder() -> Box<dyn Widget<AppState>> {
-    Box::new(ViewSwitcher::new(
-        |data: &AppState, _env: &Env| data.versions.is_empty(),
-        |empty: &bool, _data: &AppState, _env: &Env| -> Box<dyn Widget<AppState>> {
-            if *empty {
-                empty_state()
-            } else {
-                version_list_page()
-            }
-        },
-    ))
+pub fn view(state: &AppState) -> Element<'_, Message> {
+    let theme = state.theme;
+    if state.versions.is_empty() {
+        empty_state(&theme)
+    } else {
+        version_list_page(state, &theme)
+    }
 }
 
 #[cfg(test)]
@@ -256,10 +229,8 @@ mod tests {
             version("alpha", VersionType::Vanilla, 200),
             version("Alpha", VersionType::Vanilla, 100),
         ];
-        // 名称逐字节比较：大写 `Alpha` 排在小写 `alpha` 之前。
         let expected = vec!["Alpha", "alpha", "beta"];
         assert_eq!(names(&sort_versions(versions.clone(), 0)), expected);
-        // 模式 1 官方未实现时间序（OB-14），结果必须与模式 0 完全相同。
         assert_eq!(names(&sort_versions(versions, 1)), expected);
     }
 
@@ -270,7 +241,6 @@ mod tests {
             version("c", VersionType::Vanilla, 300),
             version("b", VersionType::Vanilla, 300),
         ];
-        // 创建时间降序；相同时间按名称升序兜底 → b、c，最后 a。
         assert_eq!(names(&sort_versions(versions, 2)), vec!["b", "c", "a"]);
     }
 
@@ -287,7 +257,9 @@ mod tests {
         ];
         assert_eq!(
             names(&sort_versions(versions, 3)),
-            vec!["unknown", "vanilla", "forge", "fabric", "optifine", "quilt", "neoforge"]
+            vec![
+                "unknown", "vanilla", "forge", "fabric", "optifine", "quilt", "neoforge"
+            ]
         );
         assert!(version_type_rank(VersionType::Fabric) < version_type_rank(VersionType::NeoForge));
     }

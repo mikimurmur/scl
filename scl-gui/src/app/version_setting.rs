@@ -1,12 +1,12 @@
 //! 版本设置页面的后台逻辑。
 
-use druid::{EventCtx, Target};
+use crate::app::{EventCtx, Target};
 use scl_core::version::{
-    mods::Mod, structs::VersionInfo as CoreVersionInfo, VersionType as CoreVersionType,
+    VersionType as CoreVersionType, mods::Mod, structs::VersionInfo as CoreVersionInfo,
 };
 
 use crate::{
-    app::{AppEvent, APP_EVENT},
+    app::{APP_EVENT, AppEvent},
     app_state::{AppState, LocalMod},
     core::{CoreTransformer, SCLLaunchConfig, VersionType},
     ui::{PAGE_MODS_DOWNLOAD, PAGE_VERSION},
@@ -42,6 +42,52 @@ pub fn cache_entry_matches(
 /// 任一不匹配即丢弃，避免把 A 版本的模组/计数写进 B 版本。
 pub fn accepts_load(current_name: &str, current_token: u64, name: &str, token: u64) -> bool {
     !current_name.is_empty() && current_name == name && current_token == token
+}
+
+/// 打开当前版本的游戏目录或其中的子目录。
+pub fn open_version_dir(data: &AppState, sub: Option<&'static str>) {
+    let version_name = data.version_setting_version_name.to_owned();
+    if version_name.is_empty() {
+        return;
+    }
+    let version_base = data.versions_folder();
+    let independence_method = data.config.version_independent_method;
+    thread_main(async move {
+        let mut info = CoreVersionInfo {
+            version_base: version_base.to_string_lossy().to_string(),
+            version: version_name,
+            ..Default::default()
+        };
+        if info.load().await.is_ok() {
+            if info.scl_launch_config.is_none() {
+                let game_independent = crate::utils::prelude::should_version_independent(
+                    independence_method,
+                    &info.minecraft_version,
+                    VersionType::from(info.version_type),
+                );
+                info.scl_launch_config = Some(scl_core::version::structs::SCLLaunchConfig {
+                    game_independent,
+                    ..Default::default()
+                });
+            }
+            let mut dir = info.version_path();
+            if let Some(sub) = sub {
+                if sub == "resourcepacks"
+                    && !dir.join("resourcepacks").exists()
+                    && dir.join("texturepacks").exists()
+                {
+                    dir.push("texturepacks");
+                } else {
+                    dir.push(sub);
+                }
+                let _ = smol::fs::create_dir_all(&dir).await;
+            }
+            if let Some(path) = dir.to_str() {
+                let _ = crate::utils::open_url::open_url(path);
+            }
+        }
+        Ok(())
+    });
 }
 
 /// 从模组元数据中取出图标在 jar 内的路径（与 `Mod::try_get_mod_icon` 同判据）。
@@ -86,10 +132,7 @@ async fn read_mods(info: &CoreVersionInfo) -> anyhow::Result<Vec<LocalMod>> {
 /// 模组列表的图标在进入模组管理页时再加载（官方模组行 586ms、图标不阻塞描述）。
 ///
 /// 返回 `Err` 表示 mods 目录读取失败（官方此时显示「无」而不是「已安装 0」）。
-async fn read_mods_with(
-    info: &CoreVersionInfo,
-    with_icons: bool,
-) -> anyhow::Result<Vec<LocalMod>> {
+async fn read_mods_with(info: &CoreVersionInfo, with_icons: bool) -> anyhow::Result<Vec<LocalMod>> {
     let mods = info.get_mods().await?;
     let total = mods.len();
     if total == 0 {
@@ -99,8 +142,9 @@ async fn read_mods_with(
     // 这里用固定 8 个原生线程分块并行，最后按下标还原 `read_dir` 原始顺序。
     let workers = total.min(32);
     let mut indexed: Vec<(usize, LocalMod)> = Vec::with_capacity(total);
-    let slots: Vec<std::sync::Mutex<Vec<(usize, LocalMod)>>> =
-        (0..workers).map(|_| std::sync::Mutex::new(Vec::new())).collect();
+    let slots: Vec<std::sync::Mutex<Vec<(usize, LocalMod)>>> = (0..workers)
+        .map(|_| std::sync::Mutex::new(Vec::new()))
+        .collect();
     std::thread::scope(|scope| {
         for (worker, slot) in slots.iter().enumerate() {
             let chunk: Vec<(usize, Mod)> = mods
@@ -126,15 +170,13 @@ async fn read_mods_with(
                             .map(|m| m.version().to_owned())
                             .unwrap_or_default();
                         let icon = if with_icons {
-                            meta.as_ref()
-                                .and_then(mod_icon_path)
-                                .and_then(|icon_path| {
-                                    read_mod_icon(item.path(), &icon_path)
-                                        .and_then(|image| crate::utils::thread::image_buf_from_dynamic(image).ok())
+                            meta.as_ref().and_then(mod_icon_path).and_then(|icon_path| {
+                                read_mod_icon(item.path(), &icon_path).and_then(|image| {
+                                    crate::utils::thread::image_handle_from_dynamic(image).ok()
                                 })
-                                .unwrap_or_else(druid::ImageBuf::empty)
+                            })
                         } else {
-                            druid::ImageBuf::empty()
+                            None
                         };
                         LocalMod {
                             name,
@@ -173,10 +215,7 @@ fn read_counts(game_dir: &std::path::Path) -> (String, String) {
         game_dir.join("texturepacks")
     };
     // 「已安装」行即使为 0（甚至目录不存在）也显示数字。
-    let resource_packs_desc = format!(
-        "已安装 {}",
-        count_dir_entries(&resource_dir).unwrap_or(0)
-    );
+    let resource_packs_desc = format!("已安装 {}", count_dir_entries(&resource_dir).unwrap_or(0));
     (maps_desc, resource_packs_desc)
 }
 
@@ -212,9 +251,7 @@ fn load_mods_task(
     cache_epoch: u64,
     independence_method: crate::config::VersionIndependentMethod,
 ) {
-    tracing::debug!(
-        "版本设置计数加载开始：{version_name} token={token} icons={with_icons}"
-    );
+    tracing::debug!("版本设置计数加载开始：{version_name} token={token} icons={with_icons}");
     let sink = ctx.get_external_handle();
     thread_main(async move {
         let mut info = CoreVersionInfo {
@@ -366,6 +403,11 @@ pub fn on_app_push_page(ctx: &mut EventCtx, data: &mut AppState) {
 
 /// 重新加载当前版本的模组列表（进入模组管理页时连图标一起加载）
 pub fn load_mods(ctx: &mut EventCtx, data: &mut AppState) {
+    // 截图/交互测试使用内置假数据，不读取真实的版本目录。
+    if std::env::var_os("SCL_MOCK").is_some() {
+        data.rebuild_mods_filter();
+        return;
+    }
     let name = data.version_setting_version_name.to_owned();
     if name.is_empty() {
         return;
@@ -461,9 +503,7 @@ pub fn save_on_close(data: &AppState) {
     match launch_config_to_save(&data.version_setting_config) {
         Some(config) => match serde_json::to_string(&config) {
             Ok(json) => {
-                if let Err(err) =
-                    crate::utils::prelude::write_file_safe_sync(&path, json)
-                {
+                if let Err(err) = crate::utils::prelude::write_file_safe_sync(&path, json) {
                     tracing::error!("关闭前保存版本设置失败：{err:?}");
                 } else {
                     tracing::debug!("关闭前已保存版本设置");

@@ -6,7 +6,7 @@
 //! 父控制台，并读取控制台模式与输出代码页供 tracing 初始化使用。
 
 use std::{
-    ffi::{c_void, OsStr},
+    ffi::{OsStr, c_void},
     os::windows::ffi::OsStrExt,
 };
 
@@ -24,7 +24,7 @@ const INVALID_HANDLE_VALUE: Handle = -1;
 pub const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
 
 #[link(name = "kernel32")]
-extern "system" {
+unsafe extern "system" {
     fn FreeConsole() -> i32;
     fn AttachConsole(dw_process_id: u32) -> i32;
     fn GetStdHandle(n_std_handle: u32) -> Handle;

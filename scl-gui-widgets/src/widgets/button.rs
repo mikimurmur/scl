@@ -1,182 +1,141 @@
-//! 一个按钮，修改自 [`druid::widget::Button`]
+//! 常用按钮组件。
 
-use druid::{
-    widget::{prelude::*, Click, ControllerHost, Label, LabelText},
-    Affine, Data, Insets,
-};
+use iced::widget::{button as iced_button, column};
+use iced::{Element, Length};
 
-use super::label;
-use crate::theme::color as theme;
+use super::common::{ButtonKind, styled_text};
+use crate::theme::Theme;
 
-// the minimum padding added to a button.
-// NOTE: these values are chosen to match the existing look of TextBox; these
-// should be reevaluated at some point.
-const LABEL_INSETS: Insets = Insets::uniform_xy(8., 2.);
-
-/// A button with a text label.
-pub struct Button<T> {
-    label: Label<T>,
-    label_size: Size,
-    accent: bool,
+/// 创建一个普通文本按钮。
+pub fn button<'a, Message: Clone + 'a>(
+    theme: &Theme,
+    label: impl Into<String>,
+    kind: ButtonKind,
+    on_press: Message,
+) -> Element<'a, Message> {
+    button_maybe(theme, label, kind, Some(on_press))
 }
 
-impl<T: Data> Button<T> {
-    /// Create a new button with a text label.
-    ///
-    /// Use the [`.on_click`] method to provide a closure to be called when the
-    /// button is clicked.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use druid::widget::Button;
-    ///
-    /// let button = Button::new("Increment").on_click(|_ctx, data: &mut u32, _env| {
-    ///     *data += 1;
-    /// });
-    /// ```
-    ///
-    /// [`.on_click`]: #method.on_click
-    pub fn new(text: impl Into<LabelText<T>>) -> Button<T> {
-        Button::from_label(label::new(text).with_font(theme::typography::BODY))
+/// 创建一个可以禁用的文本按钮。
+pub fn button_maybe<'a, Message: Clone + 'a>(
+    theme: &Theme,
+    label: impl Into<String>,
+    kind: ButtonKind,
+    on_press: Option<Message>,
+) -> Element<'a, Message> {
+    let theme = *theme;
+    let content = iced::widget::text(label.into())
+        .size(theme.typography.body.size)
+        .font(theme.typography.body.font);
+
+    let mut widget = iced_button(content)
+        .padding([6, 10])
+        .style(kind.style(theme));
+
+    if let Some(message) = on_press {
+        widget = widget.on_press(message);
     }
 
-    /// Create a new button with the provided [`Label`].
-    ///
-    /// Use the [`.on_click`] method to provide a closure to be called when the
-    /// button is clicked.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use druid::Color;
-    /// use druid::widget::{Button, Label};
-    ///
-    /// let button = Button::from_label(Label::new("Increment").with_text_color(Color::grey(0.5))).on_click(|_ctx, data: &mut u32, _env| {
-    ///     *data += 1;
-    /// });
-    /// ```
-    ///
-    /// [`Label`]: struct.Label.html
-    /// [`.on_click`]: #method.on_click
-    pub fn from_label(label: Label<T>) -> Button<T> {
-        Button {
-            label,
-            label_size: Size::ZERO,
-            accent: false,
-        }
-    }
-
-    /// Construct a new dynamic button.
-    ///
-    /// The contents of this button are generated from the data using a closure.
-    ///
-    /// This is provided as a convenience; a closure can also be passed to [`new`],
-    /// but due to limitations of the implementation of that method, the types in
-    /// the closure need to be annotated, which is not true for this method.
-    ///
-    /// # Examples
-    ///
-    /// The following are equivalent.
-    ///
-    /// ```
-    /// use druid::Env;
-    /// use druid::widget::Button;
-    /// let button1: Button<u32> = Button::new(|data: &u32, _: &Env| format!("total is {}", data));
-    /// let button2: Button<u32> = Button::dynamic(|data, _| format!("total is {}", data));
-    /// ```
-    ///
-    /// [`new`]: #method.new
-    pub fn dynamic(text: impl Fn(&T, &Env) -> String + 'static) -> Self {
-        let text: LabelText<T> = text.into();
-        Button::new(text)
-    }
-
-    /// Provide a closure to be called when this button is clicked.
-    pub fn on_click(
-        self,
-        f: impl Fn(&mut EventCtx, &mut T, &Env) + 'static,
-    ) -> ControllerHost<Self, Click<T>> {
-        ControllerHost::new(self, Click::new(f))
-    }
-
-    /// Use accent color as button color
-    pub fn set_accent(&mut self, value: bool) {
-        self.accent = value;
-        self.label.set_text_color(if self.accent {
-            theme::chrome::WHITE_HIGH
-        } else {
-            theme::typography::FONT_COLOR
-        })
-    }
-
-    /// Builder style to use accent color as button color
-    pub fn with_accent(mut self, value: bool) -> Self {
-        self.set_accent(value);
-        self
-    }
+    widget.into()
 }
 
-impl<T: Data> Widget<T> for Button<T> {
-    fn event(&mut self, ctx: &mut EventCtx, event: &Event, _data: &mut T, _env: &Env) {
-        match event {
-            Event::MouseDown(_) => {
-                ctx.set_active(true);
-                ctx.request_paint();
-            }
-            Event::MouseUp(_) if ctx.is_active() => {
-                ctx.set_active(false);
-                ctx.request_paint();
-            }
-            _ => (),
-        }
+/// 创建一个填满可用宽度的文本按钮。
+pub fn fill_button<'a, Message: Clone + 'a>(
+    theme: &Theme,
+    label: impl Into<String>,
+    kind: ButtonKind,
+    on_press: Message,
+) -> Element<'a, Message> {
+    fill_button_maybe(theme, label, kind, Some(on_press))
+}
+
+/// 创建一个可以禁用的、填满可用宽度的文本按钮。
+pub fn fill_button_maybe<'a, Message: Clone + 'a>(
+    theme: &Theme,
+    label: impl Into<String>,
+    kind: ButtonKind,
+    on_press: Option<Message>,
+) -> Element<'a, Message> {
+    let theme = *theme;
+    let content = iced::widget::text(label.into())
+        .size(theme.typography.body.size)
+        .font(theme.typography.body.font);
+
+    let mut widget = iced_button(content)
+        .width(Length::Fill)
+        .height(Length::Fixed(32.0))
+        .padding([6, 8])
+        .style(kind.style(theme));
+
+    if let Some(message) = on_press {
+        widget = widget.on_press(message);
     }
 
-    fn lifecycle(&mut self, ctx: &mut LifeCycleCtx, event: &LifeCycle, data: &T, env: &Env) {
-        if let LifeCycle::HotChanged(_) = event {
-            ctx.request_paint();
-        }
-        self.label.lifecycle(ctx, event, data, env)
+    widget.into()
+}
+
+/// 创建一个宽大的启动按钮。
+pub fn start_button<'a, Message: Clone + 'a>(
+    theme: &Theme,
+    title: impl Into<String>,
+    subtitle: impl Into<String>,
+    enabled: bool,
+    on_press: Message,
+) -> Element<'a, Message> {
+    let theme = *theme;
+    let content = column![
+        iced::widget::text(title.into())
+            .size(18.0)
+            .font(theme.typography.base_alt.font),
+        iced::widget::text(subtitle.into())
+            .size(11.0)
+            .font(theme.typography.caption.font),
+    ]
+    .spacing(1)
+    .align_x(iced::Center);
+
+    let mut widget = iced_button(content)
+        .width(Length::Fill)
+        .height(Length::Fixed(62.0))
+        .padding([8, 16])
+        .style(ButtonKind::Accent.style(theme));
+
+    if enabled {
+        widget = widget.on_press(on_press);
     }
 
-    fn update(&mut self, ctx: &mut UpdateCtx, old_data: &T, data: &T, env: &Env) {
-        self.label.update(ctx, old_data, data, env)
-    }
+    widget.into()
+}
 
-    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints, data: &T, env: &Env) -> Size {
-        bc.debug_check("Button");
-        let padding = Size::new(LABEL_INSETS.x_value(), LABEL_INSETS.y_value());
-        let label_bc = bc.shrink(padding).loosen();
-        self.label_size = self.label.layout(ctx, &label_bc, data, env);
-        // HACK: to make sure we look okay at default sizes when beside a textbox,
-        // we make sure we will have at least the same height as the default textbox.
-        let min_height = 32.;
-        let baseline = self.label.baseline_offset();
-        ctx.set_baseline_offset(baseline + LABEL_INSETS.y1);
+/// 创建一个只有文字的扁平按钮。
+pub fn flat_button<'a, Message: Clone + 'a>(
+    theme: &Theme,
+    label: impl Into<String>,
+    on_press: Message,
+) -> Element<'a, Message> {
+    button(theme, label, ButtonKind::Flat, on_press)
+}
 
-        bc.constrain(Size::new(
-            self.label_size.width + padding.width,
-            (self.label_size.height + padding.height).max(min_height),
-        ))
-    }
+/// 创建一个带标题和说明文字的设置项。
+pub fn setting_row<'a, Message: Clone + 'a>(
+    theme: &Theme,
+    title: impl Into<String>,
+    description: impl Into<String>,
+    control: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let theme = *theme;
+    let text_column = column![
+        styled_text(title.into(), theme.typography.body, theme.font_color),
+        styled_text(
+            description.into(),
+            theme.typography.caption,
+            theme.base.medium
+        ),
+    ]
+    .spacing(2);
 
-    fn paint(&mut self, ctx: &mut PaintCtx, data: &T, env: &Env) {
-        let is_hot = ctx.is_hot();
-        let is_active = ctx.is_active();
-        let size = ctx.size();
-
-        super::common::print_common_button(
-            (self.accent, false, is_active, is_hot, ctx.is_disabled()),
-            ctx,
-            size,
-            env,
-        );
-
-        let label_offset = (size.to_vec2() - self.label_size.to_vec2()) / 2.0;
-
-        ctx.with_save(|ctx| {
-            ctx.transform(Affine::translate(label_offset));
-            self.label.paint(ctx, data, env);
-        });
-    }
+    iced::widget::row![text_column.width(Length::Fill), control.into()]
+        .align_y(iced::Center)
+        .spacing(12)
+        .into()
 }

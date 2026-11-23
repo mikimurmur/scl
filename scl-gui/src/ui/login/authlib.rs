@@ -1,83 +1,79 @@
 //! Authlib Injector 第三方登录页面。
 
-use druid::{Target, Widget, WidgetExt};
-use scl_gui_widgets::{
-    theme::color::{main, typography},
-    widgets::{label, Button, PasswordBox, PressKey},
-    WidgetExt as _,
+use iced::widget::{column, container, space};
+use iced::{Element, Length};
+use scl_gui_widgets::widgets::ButtonKind;
+
+use crate::{
+    app::{LOGIN_AUTHLIB, Message},
+    app_state::AppState,
+    ui::{TextField, UiMessage, common},
 };
 
-use crate::{app::LOGIN_AUTHLIB, app_state::AppState, ui::common};
-
-fn on_enter(ctx: &mut druid::EventCtx, _data: &mut AppState, _env: &druid::Env) {
-    ctx.submit_command(LOGIN_AUTHLIB.with(()).to(Target::Global));
-}
-
 /// 创建 Authlib 登录页面
-pub fn ui_builder() -> Box<dyn Widget<AppState>> {
-    let title = label::new("Authlib Injector 登录")
-        .with_font(typography::SUBTITLE)
-        .with_text_size(20.);
+pub fn view(state: &AppState) -> Element<'_, Message> {
+    let theme = state.theme;
+    let login = common::command(LOGIN_AUTHLIB, ());
 
-    let note = label::new("注：由于 UI 框架限制，暂不支持拖拽输入验证服务器地址")
-        .show_if(|data: &AppState, _: &druid::Env| data.login_error.is_none());
+    let disabled = state.login_busy
+        || state.login_authlib_server_url.is_empty()
+        || state.login_authlib_username.is_empty()
+        || state.login_authlib_password.is_empty();
 
-    let error = label::dynamic(|data: &AppState, _: &druid::Env| {
-        data.login_error.clone().unwrap_or_default()
-    })
-    .with_text_color(main::PRIMARY)
-    .show_if(|data: &AppState, _: &druid::Env| data.login_error.is_some());
+    let mut content = column![
+        common::title(&theme, "Authlib Injector 登录"),
+        space().height(Length::Fixed(8.0)),
+        common::hint(&theme, "注：暂不支持拖拽输入验证服务器地址"),
+    ]
+    .spacing(4);
 
-    let server_label = common::field_label("验证服务器地址");
-    let user_label = common::field_label("账户名 / 角色名 / 邮箱");
-    let password_label = common::field_label("密码");
+    if let Some(error) = &state.login_error {
+        content = content.push(
+            iced::widget::text(error.clone())
+                .size(theme.typography.body.size)
+                .font(theme.typography.body.font)
+                .color(theme.main.primary),
+        );
+    }
 
-    let login = Button::new("登录")
-        .with_accent(true)
-        .on_click(|ctx, _data, _env| {
-            ctx.submit_command(LOGIN_AUTHLIB.with(()).to(Target::Global));
-        })
-        .disabled_if(|data: &AppState, _: &druid::Env| {
-            data.login_busy
-                || data.login_authlib_server_url.is_empty()
-                || data.login_authlib_username.is_empty()
-                || data.login_authlib_password.is_empty()
-        });
+    content = content
+        .push(space().height(Length::Fixed(8.0)))
+        .push(common::field_label(&theme, "验证服务器地址"))
+        .push(common::text_input_submit(
+            &theme,
+            "",
+            &state.login_authlib_server_url,
+            move |value| Message::Ui(UiMessage::Text(TextField::AuthlibServer, value)),
+            login.clone(),
+        ))
+        .push(space().height(Length::Fixed(8.0)))
+        .push(common::field_label(&theme, "账户名 / 角色名 / 邮箱"))
+        .push(common::text_input_submit(
+            &theme,
+            "",
+            &state.login_authlib_username,
+            move |value| Message::Ui(UiMessage::Text(TextField::AuthlibUser, value)),
+            login.clone(),
+        ))
+        .push(space().height(Length::Fixed(8.0)))
+        .push(common::field_label(&theme, "密码"))
+        .push(common::password_input(
+            &theme,
+            "",
+            &state.login_authlib_password,
+            move |value| Message::Ui(UiMessage::Text(TextField::AuthlibPassword, value)),
+            login.clone(),
+        ))
+        .push(space().height(Length::Fill))
+        .push(common::button_maybe(
+            &theme,
+            "登录",
+            ButtonKind::Accent,
+            (!disabled).then_some(login),
+        ));
 
-    Box::new(
-        druid::widget::Flex::column()
-            .cross_axis_alignment(druid::widget::CrossAxisAlignment::Fill)
-            .with_child(title)
-            .with_default_spacer()
-            .with_child(note)
-            .with_child(error)
-            .with_default_spacer()
-            .with_child(server_label)
-            .with_default_spacer()
-            .with_child(
-                druid::widget::TextBox::new()
-                    .lens(AppState::login_authlib_server_url)
-                    .controller(PressKey::new(druid::Code::Enter, on_enter)),
-            )
-            .with_default_spacer()
-            .with_child(user_label)
-            .with_default_spacer()
-            .with_child(
-                druid::widget::TextBox::new()
-                    .lens(AppState::login_authlib_username)
-                    .controller(PressKey::new(druid::Code::Enter, on_enter)),
-            )
-            .with_default_spacer()
-            .with_child(password_label)
-            .with_default_spacer()
-            .with_child(
-                PasswordBox::new()
-                    .lens(AppState::login_authlib_password)
-                    .controller(PressKey::new(druid::Code::Enter, on_enter)),
-            )
-            .with_flex_spacer(1.)
-            .with_child(login)
-            .expand()
-            .padding(10.),
-    )
+    container(content.padding(10))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }

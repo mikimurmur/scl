@@ -2,8 +2,12 @@
 
 use std::path::PathBuf;
 
-use druid::{Data, ImageBuf, Lens};
+use std::collections::{BTreeMap, BTreeSet};
+
+use iced::widget::image;
 use im::Vector;
+use scl_gui_widgets::theme::Theme;
+use scl_gui_widgets::widgets::PageSwitcher;
 
 pub use crate::core::LocalVersionInfo;
 use crate::{
@@ -12,7 +16,7 @@ use crate::{
 };
 
 /// 网络数据的状态
-#[derive(Debug, Clone, Data, Lens, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct NetworkData<T> {
     /// 是否正在加载
     pub loading: bool,
@@ -57,7 +61,7 @@ impl<T> NetworkData<T> {
 }
 
 /// 下载页面中保存的状态
-#[derive(Debug, Clone, Data, Lens, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DownloadState<T: Clone> {
     /// 可用的正式版本列表
     pub avaliable_versions: Vector<T>,
@@ -81,7 +85,7 @@ impl<T: Clone> DownloadState<T> {
 }
 
 /// 模组的来源
-#[derive(Debug, Clone, Copy, Data, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModSource {
     /// CurseForge
     #[default]
@@ -91,7 +95,7 @@ pub enum ModSource {
 }
 
 /// 一个可下载的模组
-#[derive(Debug, Clone, Data, Lens)]
+#[derive(Debug, Clone)]
 pub struct ModState {
     /// 模组 ID
     pub id: String,
@@ -102,8 +106,10 @@ pub struct ModState {
     /// 模组图标（官方格式的 ASCII85 编码字符串）
     pub icon: String,
     /// 模组来源
+    #[allow(dead_code)]
     pub source: ModSource,
     /// 下载量
+    #[allow(dead_code)]
     pub download_count: u64,
     /// 模组的字符串 ID（CF slug / MR slug），用于查询中文名
     pub slug: String,
@@ -127,7 +133,7 @@ impl Default for ModState {
 }
 
 /// 一个可下载的模组文件
-#[derive(Debug, Clone, Data, Lens, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ModFileState {
     /// 文件名
     pub file_name: String,
@@ -142,7 +148,7 @@ pub struct ModFileState {
 }
 
 /// 一个已经安装的模组
-#[derive(Debug, Clone, Data, Lens)]
+#[derive(Debug, Clone)]
 pub struct LocalMod {
     /// 模组名称
     pub name: String,
@@ -153,7 +159,7 @@ pub struct LocalMod {
     /// 是否启用
     pub enabled: bool,
     /// 模组图标
-    pub icon: ImageBuf,
+    pub icon: Option<image::Handle>,
     /// 模组文件路径
     pub path: String,
 }
@@ -165,7 +171,7 @@ impl Default for LocalMod {
             file_name: String::new(),
             version: String::new(),
             enabled: true,
-            icon: ImageBuf::empty(),
+            icon: None,
             path: String::new(),
         }
     }
@@ -175,7 +181,7 @@ impl Default for LocalMod {
 ///
 /// 按版本名缓存：同一版本在本次会话内只加载一次，从子页返回或
 /// A→B→A 切换时直接复用，不再读盘重算。
-#[derive(Debug, Clone, Data, Lens)]
+#[derive(Debug, Clone)]
 pub struct VersionSettingCacheEntry {
     /// 版本名称
     pub version_name: String,
@@ -191,16 +197,27 @@ pub struct VersionSettingCacheEntry {
     pub epoch: u64,
 }
 
+/// 一个正在进行的后台任务进度。
+#[derive(Debug, Clone, Default)]
+pub struct ProgressEntry {
+    /// 主消息。
+    pub message: String,
+    /// 次级消息。
+    pub sub_message: String,
+    /// 当前进度。
+    pub current: f64,
+    /// 最大进度；`None` 表示不确定进度。
+    pub max: Option<f64>,
+}
+
 /// 启动器全局状态
-#[derive(Debug, Clone, Data, Lens)]
+#[derive(Debug, Clone)]
 pub struct AppState {
     /// 配置文件
     pub config: Config,
 
     /// 已安装的所有版本
     pub versions: Vector<LocalVersionInfo>,
-    /// 游戏文件夹页面中新增文件夹的输入框内容
-    pub new_minecraft_folder: String,
     /// 版本列表搜索关键词
     pub versions_search_filter: String,
     /// 版本列表排序方式（与官方模式编号 0~3 对齐）：
@@ -214,8 +231,6 @@ pub struct AppState {
     pub setting_launch_java_memory_size: String,
     /// 设置页面中的更新日志
     pub setting_about_update_logs: Option<String>,
-    /// 设置页面中手动添加 Java 时输入的路径
-    pub setting_java_manual_path: String,
 
     /// 启动游戏时的提示
     pub starting_tip: Option<String>,
@@ -354,6 +369,27 @@ pub struct AppState {
     pub auto_recheck_retry: bool,
     /// 是否第一次运行启动器（配置文件原本不存在）
     pub first_run: bool,
+
+    /// 当前主题。
+    pub theme: Theme,
+    /// 页面栈。
+    pub pages: PageSwitcher<&'static str>,
+    /// 当前窗口 ID。
+    pub window: Option<iced::window::Id>,
+    /// 后台任务进度表。
+    pub progress: BTreeMap<usize, ProgressEntry>,
+    /// 需要显示的后台任务错误。
+    pub async_error: Option<(String, String)>,
+    /// 是否允许标题栏显示返回按钮。
+    pub back_enabled: bool,
+    /// 页面切换动画开关（Iced 版本保留配置语义）。
+    pub slide_page_animation: bool,
+    /// 窗口背景图。
+    pub background_image: Option<image::Handle>,
+    /// 不确定进度条动画相位（0.0..1.0）。
+    pub animation_phase: f32,
+    /// 已折叠的版本分组键。
+    pub collapsed_folders: BTreeSet<String>,
 }
 
 impl Default for AppState {
@@ -409,16 +445,15 @@ impl AppState {
     /// 使用配置创建一个新的全局状态
     pub fn new(config: Config) -> Self {
         let memory_size_str = config.mem_size.to_string();
+        let theme = crate::theme::theme_from_config(&config);
         Self {
             config,
             versions: Vector::new(),
-            new_minecraft_folder: String::new(),
             versions_search_filter: String::new(),
             versions_sort_mode: 0,
             setting_page_index: 0,
             setting_launch_java_memory_size: memory_size_str,
             setting_about_update_logs: None,
-            setting_java_manual_path: String::new(),
             starting_tip: None,
             launch_window_ready: false,
             launch_error_logs: Vector::new(),
@@ -485,6 +520,16 @@ impl AppState {
             launching: false,
             auto_recheck_retry: false,
             first_run: false,
+            theme,
+            pages: PageSwitcher::new(crate::ui::PAGE_MAIN),
+            window: None,
+            progress: BTreeMap::new(),
+            async_error: None,
+            back_enabled: true,
+            slide_page_animation: true,
+            background_image: None,
+            animation_phase: 0.0,
+            collapsed_folders: BTreeSet::new(),
         }
     }
 
@@ -727,7 +772,6 @@ pub fn apply_mock(state: &mut AppState) {
     if std::env::var_os("SCL_MOCK_VERSION_SETTING_EMPTY").is_none() {
         state.version_setting_version_name_rename = "1.20.1-Fabric".into();
         // 官方描述格式为「已安装 N」/「已游玩 N」，0 条时为「无」（见 on_app_push_page）。
-        state.rebuild_mods_filter();
         state.version_setting_mods_desc = "已安装 19".into();
         state.version_setting_maps_desc = "无".into();
         state.version_setting_resource_packs_desc = "无".into();
@@ -738,7 +782,7 @@ pub fn apply_mock(state: &mut AppState) {
         file_name: format!("{name}-{version}.jar"),
         version: version.to_owned(),
         enabled: true,
-        icon: ImageBuf::empty(),
+        icon: None,
         path: format!("/tmp/scl-mock/mods/{name}-{version}.jar"),
     };
     state.version_mods = im::vector![
@@ -750,6 +794,7 @@ pub fn apply_mock(state: &mut AppState) {
         local_mod("Jade", "11.13.3+fabric"),
         local_mod("Randomlocke PvP", "1.3.0"),
     ];
+    state.rebuild_mods_filter();
 
     let mod_state = |name: &str, description: &str, source: ModSource, downloads: u64| ModState {
         id: name.to_lowercase().replace(' ', "-"),
@@ -874,4 +919,5 @@ pub fn apply_mock(state: &mut AppState) {
     state.launch_error = Some("启动失败：未找到有效的 Java 运行时".into());
     state.config.minecraft_folder = crate::config::MinecraftFolder::CurrentDirectory;
     state.config.minecraft_folders = im::Vector::new();
+    state.theme = crate::theme::theme_from_config(&state.config);
 }

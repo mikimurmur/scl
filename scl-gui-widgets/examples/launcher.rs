@@ -6,14 +6,14 @@
 //! 运行：
 //!
 //! ```sh
-//! cargo run -p scl-gui-iced --example launcher
+//! cargo run -p scl-gui-widgets --example launcher
 //! ```
 
 use iced::widget::{column, container, row, space, text};
 use iced::{Element, Length, Size, Subscription, Task};
-use scl_gui_iced::icons::{self, Icon};
-use scl_gui_iced::theme::Theme;
-use scl_gui_iced::widgets::{
+use scl_gui_widgets::icons::{self, Icon};
+use scl_gui_widgets::theme::Theme;
+use scl_gui_widgets::widgets::{
     self, ButtonKind, ListItem, NavigationItem, PageSwitcher, WindowMessage,
 };
 

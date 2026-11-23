@@ -1,493 +1,400 @@
-//! 根据 Windows UI （原 Fluent Design）规范制成的颜色和字体模块
-//!
-//! 详情请参考 <https://www.figma.com/community/file/989931624019688277>
+//! 根据 Windows UI（原 Fluent Design）规范整理的颜色主题。
 
-/// 基本颜色组合，通常用在背景上显示内容（文字图标等）
-pub mod base {
-    use druid::{Color, Key};
-    /// 默认情况下 亮色模式为 `#000000 - 20%` 黑暗模式为 `#FFFFFF - 20%`
-    pub const LOW: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.light.base.low");
-    /// 默认情况下 亮色模式为 `#000000 - 40%` 黑暗模式为 `#FFFFFF - 40%`
-    pub const MEDIUM_LOW: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.light.base.medium-low");
-    /// 默认情况下 亮色模式为 `#000000 - 60%` 黑暗模式为 `#FFFFFF - 60%`
-    pub const MEDIUM: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.light.base.medium");
-    /// 默认情况下 亮色模式为 `#000000 - 80%` 黑暗模式为 `#FFFFFF - 80%`
-    pub const MEDIUM_HIGH: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.light.base.medium-high");
-    /// 默认情况下 亮色模式为 `#000000 - 100%` 黑暗模式为 `#FFFFFF - 100%`
-    pub const HIGH: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.light.base.high");
-}
-
-/// 次颜色组合，通常用在背景显示，颜色组合与 [`crate::theme::color::base`] 相反
-pub mod alt {
-    use druid::{Color, Key};
-    /// 默认情况下 亮色模式为 `#FFFFFF - 20%` 黑暗模式为 `#000000 - 20%`
-    pub const LOW: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.light.alt.low");
-    /// 默认情况下 亮色模式为 `#FFFFFF - 40%` 黑暗模式为 `#000000 - 40%`
-    pub const MEDIUM_LOW: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.light.alt.medium-low");
-    /// 默认情况下 亮色模式为 `#FFFFFF - 60%` 黑暗模式为 `#000000 - 60%`
-    pub const MEDIUM: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.light.alt.medium");
-    /// 默认情况下 亮色模式为 `#FFFFFF - 80%` 黑暗模式为 `#000000 - 80%`
-    pub const MEDIUM_HIGH: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.light.alt.medium-high");
-    /// 默认情况下 亮色模式为 `#FFFFFF - 100%` 黑暗模式为 `#000000 - 100%`
-    pub const HIGH: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.light.alt.high");
-}
-
-/// 外壳颜色组合，此处的部分颜色是实色而非 [`crate::theme::color::base`] 和 [`crate::theme::color::alt`] 的半透明颜色组
-pub mod chrome {
-    use druid::{Color, Key};
-    /// 默认情况下 亮色模式为 `#FFFFFF` 黑暗模式为 `#FFFFFF`
-    pub const WHITE_HIGH: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.white-high");
-    /// 默认情况下 亮色模式为 `#F2F2F2` 黑暗模式为 `#2B2B2B`
-    pub const MEDIUM_LOW: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.medium-low");
-    /// 默认情况下 亮色模式为 `#F2F2F2` 黑暗模式为 `#171717`
-    pub const LOW: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.low");
-    /// 默认情况下 亮色模式为 `#CCCCCC` 黑暗模式为 `#333333`
-    pub const DISABLED_HIGH: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.chrome.disabled-high");
-    /// 默认情况下 亮色模式为 `#E6E6E6` 黑暗模式为 `#1F1F1F`
-    pub const MEDIUM: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.medium");
-    /// 默认情况下 亮色模式为 `#CCCCCC` 黑暗模式为 `#767676`
-    pub const HIGH: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.high");
-    /// 默认情况下 亮色模式为 `#CCCCCC` 黑暗模式为 `#767676`
-    pub const BLACK_LOW: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.black-low");
-    /// 默认情况下 亮色模式为 `#000000 - 40%` 黑暗模式为 `#000000 - 40%`
-    pub const BLACK_MEDIUM_LOW: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.chrome.black-medium-low");
-    /// 默认情况下 亮色模式为 `#7A7A7A` 黑暗模式为 `#858585`
-    pub const DISABLED_LOW: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.chrome.disabled-low");
-    /// 默认情况下 亮色模式为 `#000000 - 80%` 黑暗模式为 `#000000 - 80%`
-    pub const BLACK_MEDIUM: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.chrome.black-medium");
-    /// 默认情况下 亮色模式为 `#000000 - 40%` 黑暗模式为 `#F2F2F2`
-    pub const ALT_LOW: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.alt-low");
-    /// 默认情况下 亮色模式为 `#000000` 黑暗模式为 `#000000`
-    pub const BLACK_HIGH: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.black-high");
-    /// 默认情况下 亮色模式为 `#FFFFFF` 黑暗模式为 `#FFFFFF`
-    pub const WHITE: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.white");
-}
-
-/// 列表颜色组，不知道为什么微软要单独分这么一组颜色出来
-pub mod list {
-    use druid::{Color, Key};
-    /// 默认情况下 亮色模式为 `#0078D4 - 70%` 黑暗模式为 `#0078D4 - 90%`
-    pub const ACCENT_HIGH: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.chrome.accent-high");
-    /// 默认情况下 亮色模式为 `#0078D4 - 60%` 黑暗模式为 `#0078D4 - 80%`
-    pub const ACCENT_MEDIUM: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.chrome.accent-medium");
-    /// 默认情况下 亮色模式为 `#0078D4 - 40%` 黑暗模式为 `#0078D4 - 60%`
-    pub const ACCENT_LOW: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.accent-low");
-    /// 默认情况下 亮色模式为 `#000000 - 10%` 黑暗模式为 `#000000 - 10%`
-    pub const LIST_LOW: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.list-low");
-    /// 默认情况下 亮色模式为 `#000000 - 20%` 黑暗模式为 `#000000 - 20%`
-    pub const LIST_MEDIUM: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.chrome.list-medium");
-}
-
-/// 边框颜色组
-pub mod border {
-    use druid::{Color, Key};
-    /// 默认情况下 亮色模式为 `#FFFFFF - 60%` 黑暗模式为 `#FFFFFF - 5%`
-    pub const EDGE_HIGHTLIGHT: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.chrome.edge-hightlight");
-    /// 默认情况下 亮色模式为 `#000000 - 14%` 黑暗模式为 `#000000 - 36%`
-    pub const TRANSIENT: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.transient");
-}
-
-/// 主要颜色组
-pub mod accent {
-    use druid::{Color, Key};
-    /// 默认情况下 亮色模式为 `#0078D4` 黑暗模式为 `#0078D4`
-    pub const ACCENT: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.accent");
-    /// 默认情况下 亮色模式为 `#429CE3` 黑暗模式为 `#429CE3`
-    pub const ACCENT_1: Key<Color> = Key::new("net.stevexmh.scl.fluent.color.chrome.accent-1");
-    /// 默认情况下 亮色模式为 `#005A9E` 黑暗模式为 `#005A9E`
-    pub const ACCENT_DARK_1: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.chrome.accent-dark-1");
-    /// 默认情况下 亮色模式为 `#FF7233` 黑暗模式为 `#FF7233`
-    pub const ACCENT_LIGHT_1: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.chrome.accent-light-1");
-}
-
-/// 字体组
-pub mod typography {
-    use druid::{Color, FontDescriptor, Key};
-    /// 标准字体颜色，默认情况下 亮色模式为 `#201F1E` 黑暗模式为 `#FFFFFF`
-    pub const FONT_COLOR: Key<Color> =
-        Key::new("net.stevexmh.scl.fluent.color.typography.font-color");
-
-    /// 副标题字体，默认情况下大小为 34px 字重为 Light
-    pub const SUBHEADER: Key<FontDescriptor> =
-        Key::new("net.stevexmh.scl.fluent.color.typography.subheader");
-    /// 大标题字体，默认情况下大小为 46px 字重为 Light
-    pub const HEADER: Key<FontDescriptor> =
-        Key::new("net.stevexmh.scl.fluent.color.typography.header");
-
-    /// 标题字体，默认情况下大小为 24px 字重为 Semi Light
-    pub const TITLE: Key<FontDescriptor> =
-        Key::new("net.stevexmh.scl.fluent.color.typography.title");
-
-    /// 标题字体，默认情况下大小为 12px 字重为 Regular
-    pub const CAPTION: Key<FontDescriptor> =
-        Key::new("net.stevexmh.scl.fluent.color.typography.caption");
-    /// 替代标题字体，默认情况下大小为 13px 字重为 Regular
-    pub const CAPTION_ALT: Key<FontDescriptor> =
-        Key::new("net.stevexmh.scl.fluent.color.typography.caption-alt");
-    /// 正文字体，默认情况下大小为 14px 字重为 Regular
-    pub const BODY: Key<FontDescriptor> = Key::new("net.stevexmh.scl.fluent.color.typography.body");
-    /// 替代副标题字体，默认情况下大小为 18px 字重为 Regular
-    pub const SUBTITLE_ALT: Key<FontDescriptor> =
-        Key::new("net.stevexmh.scl.fluent.color.typography.subtitle-alt");
-    /// 副标题字体，默认情况下大小为 20px 字重为 Regular
-    pub const SUBTITLE: Key<FontDescriptor> =
-        Key::new("net.stevexmh.scl.fluent.color.typography.subtitle");
-
-    /// 基本字体，默认情况下大小为 14px 字重为 Semi Bold
-    pub const BASE: Key<FontDescriptor> = Key::new("net.stevexmh.scl.fluent.color.typography.base");
-    /// 替代基本字体，默认情况下大小为 14px 字重为 Bold
-    pub const BASE_ALT: Key<FontDescriptor> =
-        Key::new("net.stevexmh.scl.fluent.color.typography.base-alt");
-}
-
-/// 为应用特别设定的几个键，和 Windows UI 无关
-pub mod main {
-    use druid::{Color, Key};
-    /// 默认情况下 亮色模式为 `#F74C00` 黑暗模式为 `#F74C00`
-    pub const PRIMARY: Key<Color> = Key::new("net.stevexmh.scl.primary");
-    /// 默认情况下 亮色模式为 `#CC3F00` 黑暗模式为 `#CC3F00`
-    pub const SECONDARY: Key<Color> = Key::new("net.stevexmh.scl.secondary");
-    /// 默认情况下 亮色模式为 `#FFFFFF - 0%` 黑暗模式为 `#FFFFFF - 0%`
-    pub const TITLE_BAR: Key<Color> = Key::new("net.stevexmh.scl.titlebar");
-    /// 是否处于黑暗模式下，默认为 `false`
-    pub const IS_DARK: Key<bool> = Key::new("net.stevexmh.scl.is-dark");
-}
-
+use iced::{Color, Theme as IcedTheme};
 use serde::{Deserialize, Serialize};
 
-/// 页面主题颜色，有亮色和暗色区分
-#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub enum Theme {
-    /// 亮色模式
+/// 一个用于配置文件的 8 位 RGBA 颜色。
+///
+/// 与 Iced 的浮点颜色分开保存，保证 `.scl.json` 中仍然使用稳定的
+/// `#RRGGBBAA` / `[r, g, b, a]` 表示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeColor {
+    /// 红色通道。
+    pub r: u8,
+    /// 绿色通道。
+    pub g: u8,
+    /// 蓝色通道。
+    pub b: u8,
+    /// Alpha 通道。
+    pub a: u8,
+}
+
+impl ThemeColor {
+    /// 从 8 位 RGBA 创建颜色。
+    pub const fn from_rgba8(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+
+    /// 转换为 8 位 RGBA 元组。
+    pub const fn as_rgba8(self) -> (u8, u8, u8, u8) {
+        (self.r, self.g, self.b, self.a)
+    }
+
+    /// 转换为 Iced 颜色。
+    pub fn to_iced(self) -> Color {
+        Color::from_rgba8(self.r, self.g, self.b, self.a as f32 / 255.0)
+    }
+}
+
+impl From<ThemeColor> for Color {
+    fn from(value: ThemeColor) -> Self {
+        value.to_iced()
+    }
+}
+
+impl From<Color> for ThemeColor {
+    fn from(value: Color) -> Self {
+        let [r, g, b, a] = value.into_rgba8();
+        Self::from_rgba8(r, g, b, a)
+    }
+}
+
+/// 主题模式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// 亮色模式。
     #[default]
     Light,
-    /// 暗色模式
+    /// 暗色模式。
     Dark,
 }
 
-use druid::{Color, Env, FontDescriptor, FontFamily, FontStyle, FontWeight};
-
-#[cfg(target_os = "windows")]
-fn get_font() -> FontFamily {
-    use druid::piet::{D2DText, DwriteFactory, Text};
-    let dwrite = DwriteFactory::new().unwrap();
-    let mut text = D2DText::new_with_shared_fonts(dwrite, None);
-    text.font_family("微软雅黑")
-        .or_else(|| text.font_family("Segoe WPC"))
-        .or_else(|| text.font_family("Segoe UI"))
-        .or_else(|| text.font_family("Garamond"))
-        .unwrap_or(FontFamily::SYSTEM_UI)
+/// 基本颜色组合，通常用于在背景上显示文字、图标等内容。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BaseColors {
+    /// 默认情况下亮色为 `#000000 - 20%`，暗色为 `#FFFFFF - 20%`。
+    pub low: Color,
+    /// 默认情况下亮色为 `#000000 - 40%`，暗色为 `#FFFFFF - 40%`。
+    pub medium_low: Color,
+    /// 默认情况下亮色为 `#000000 - 60%`，暗色为 `#FFFFFF - 60%`。
+    pub medium: Color,
+    /// 默认情况下亮色为 `#000000 - 80%`，暗色为 `#FFFFFF - 80%`。
+    pub medium_high: Color,
+    /// 默认情况下亮色为 `#000000`，暗色为 `#FFFFFF`。
+    pub high: Color,
 }
 
-#[cfg(not(target_os = "windows"))]
-fn get_font() -> FontFamily {
-    FontFamily::SYSTEM_UI
+/// 次颜色组合，颜色与 [`BaseColors`] 相反。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AltColors {
+    /// 默认情况下亮色为 `#FFFFFF - 20%`，暗色为 `#000000 - 20%`。
+    pub low: Color,
+    /// 默认情况下亮色为 `#FFFFFF - 40%`，暗色为 `#000000 - 40%`。
+    pub medium_low: Color,
+    /// 默认情况下亮色为 `#FFFFFF - 60%`，暗色为 `#000000 - 60%`。
+    pub medium: Color,
+    /// 默认情况下亮色为 `#FFFFFF - 80%`，暗色为 `#000000 - 80%`。
+    pub medium_high: Color,
+    /// 默认情况下亮色为 `#FFFFFF`，暗色为 `#000000`。
+    pub high: Color,
 }
 
-fn set_light_theme(env: &mut Env, _theme: Theme, font: FontFamily) {
-    // Light Base
-    env.set(base::LOW, Color::BLACK.with_alpha(0.2));
-    env.set(base::MEDIUM_LOW, Color::BLACK.with_alpha(0.4));
-    env.set(base::MEDIUM, Color::BLACK.with_alpha(0.6));
-    env.set(base::MEDIUM_HIGH, Color::BLACK.with_alpha(0.8));
-    env.set(base::HIGH, Color::BLACK);
-    // Light Alt
-    env.set(alt::LOW, Color::WHITE.with_alpha(0.2));
-    env.set(alt::MEDIUM_LOW, Color::WHITE.with_alpha(0.4));
-    env.set(alt::MEDIUM, Color::WHITE.with_alpha(0.6));
-    env.set(alt::MEDIUM_HIGH, Color::WHITE.with_alpha(0.8));
-    env.set(alt::HIGH, Color::WHITE);
-    // Chrome
-    env.set(chrome::WHITE_HIGH, Color::Rgba32(0xFFFFFFFF));
-    env.set(chrome::MEDIUM_LOW, Color::Rgba32(0xF2F2F2FF));
-    env.set(chrome::LOW, Color::Rgba32(0xF2F2F2FF));
-    env.set(chrome::DISABLED_HIGH, Color::Rgba32(0xCCCCCCFF));
-    env.set(chrome::MEDIUM, Color::Rgba32(0xE6E6E6FF));
-    env.set(chrome::HIGH, Color::Rgba32(0xCCCCCCFF));
-    env.set(chrome::BLACK_LOW, Color::BLACK.with_alpha(0.2));
-    env.set(chrome::BLACK_MEDIUM_LOW, Color::BLACK.with_alpha(0.4));
-    env.set(chrome::DISABLED_LOW, Color::Rgba32(0x7A7A7AFF));
-    env.set(chrome::BLACK_MEDIUM, Color::BLACK.with_alpha(0.8));
-    env.set(chrome::ALT_LOW, Color::BLACK.with_alpha(0.4));
-    env.set(chrome::BLACK_HIGH, Color::BLACK);
-    env.set(chrome::WHITE, Color::WHITE);
-    // List
-    env.set(list::ACCENT_HIGH, Color::Rgba32(0x0078D4FF).with_alpha(0.2));
-    env.set(
-        list::ACCENT_MEDIUM,
-        Color::Rgba32(0x0078D4FF).with_alpha(0.4),
-    );
-    env.set(list::ACCENT_LOW, Color::Rgba32(0x0078D4FF).with_alpha(0.6));
-    env.set(list::LIST_LOW, Color::BLACK.with_alpha(0.1));
-    env.set(list::LIST_MEDIUM, Color::BLACK.with_alpha(0.2));
-    // Border
-    env.set(border::EDGE_HIGHTLIGHT, Color::WHITE.with_alpha(0.6));
-    env.set(border::TRANSIENT, Color::BLACK.with_alpha(0.14));
-    // Accent
-    env.set(accent::ACCENT, Color::Rgba32(0x0078D4FF));
-    env.set(accent::ACCENT_1, Color::Rgba32(0x429CE3FF));
-    env.set(accent::ACCENT_DARK_1, Color::Rgba32(0x005A9EFF));
-    env.set(accent::ACCENT_LIGHT_1, Color::Rgba32(0xFF7233FF));
-    // Main
-    env.set(main::PRIMARY, Color::Rgba32(0xF74C00FF));
-    env.set(main::SECONDARY, Color::Rgba32(0xCC3F00FF));
-    env.set(main::TITLE_BAR, Color::Rgba32(0xFFFFFF00));
-    // Typography
-    env.set(typography::FONT_COLOR, Color::Rgba32(0x201F1EFF));
-
-    env.set(
-        typography::SUBHEADER,
-        FontDescriptor::new(font.to_owned())
-            .with_size(34.)
-            .with_weight(FontWeight::EXTRA_LIGHT),
-    );
-    env.set(
-        typography::HEADER,
-        FontDescriptor::new(font.to_owned())
-            .with_size(46.)
-            .with_weight(FontWeight::EXTRA_LIGHT),
-    );
-
-    env.set(
-        typography::TITLE,
-        FontDescriptor::new(font.to_owned())
-            .with_size(24.)
-            .with_weight(FontWeight::EXTRA_LIGHT),
-    );
-
-    env.set(
-        typography::CAPTION,
-        FontDescriptor::new(font.to_owned())
-            .with_size(12.)
-            .with_weight(FontWeight::LIGHT),
-    );
-    env.set(
-        typography::CAPTION_ALT,
-        FontDescriptor::new(font.to_owned())
-            .with_size(13.)
-            .with_weight(FontWeight::LIGHT),
-    );
-    env.set(
-        typography::BODY,
-        FontDescriptor::new(font.to_owned())
-            .with_size(14.)
-            .with_weight(FontWeight::REGULAR),
-    );
-    env.set(
-        typography::SUBTITLE_ALT,
-        FontDescriptor::new(font.to_owned())
-            .with_size(18.)
-            .with_weight(FontWeight::REGULAR),
-    );
-    env.set(
-        typography::SUBTITLE,
-        FontDescriptor::new(font.to_owned())
-            .with_size(20.)
-            .with_weight(FontWeight::REGULAR),
-    );
-
-    env.set(
-        typography::BASE,
-        FontDescriptor::new(font.to_owned())
-            .with_size(14.)
-            .with_weight(FontWeight::REGULAR),
-    );
-    env.set(
-        typography::BASE_ALT,
-        FontDescriptor::new(font.to_owned())
-            .with_size(14.)
-            .with_weight(FontWeight::SEMI_BOLD),
-    );
-    // Druid Fonts
-    env.set(
-        druid::theme::UI_FONT,
-        FontDescriptor::new(font.to_owned())
-            .with_size(15.)
-            .with_weight(FontWeight::REGULAR),
-    );
-    env.set(
-        druid::theme::UI_FONT_BOLD,
-        FontDescriptor::new(font.to_owned())
-            .with_size(15.)
-            .with_weight(FontWeight::BOLD),
-    );
-    env.set(
-        druid::theme::UI_FONT_ITALIC,
-        FontDescriptor::new(font)
-            .with_size(15.)
-            .with_style(FontStyle::Italic)
-            .with_weight(FontWeight::REGULAR),
-    );
-    // Others
-    env.set(
-        druid::theme::WINDOW_BACKGROUND_COLOR,
-        Color::Rgba32(0xF3F3F3FF),
-    );
+/// 外壳颜色组合。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChromeColors {
+    /// 亮色 `#FFFFFF`，暗色 `#FFFFFF`。
+    pub white_high: Color,
+    /// 亮色 `#F2F2F2`，暗色 `#2B2B2B`。
+    pub medium_low: Color,
+    /// 亮色 `#F2F2F2`，暗色 `#171717`。
+    pub low: Color,
+    /// 亮色 `#CCCCCC`，暗色 `#333333`。
+    pub disabled_high: Color,
+    /// 亮色 `#E6E6E6`，暗色 `#1F1F1F`。
+    pub medium: Color,
+    /// 亮色 `#CCCCCC`，暗色 `#767676`。
+    pub high: Color,
+    /// 亮色 `#000000 - 20%`，暗色 `#000000 - 20%`。
+    pub black_low: Color,
+    /// 亮色 `#000000 - 40%`，暗色 `#000000 - 40%`。
+    pub black_medium_low: Color,
+    /// 亮色 `#7A7A7A`，暗色 `#858585`。
+    pub disabled_low: Color,
+    /// 亮色 `#000000 - 80%`，暗色 `#000000 - 80%`。
+    pub black_medium: Color,
+    /// 亮色 `#000000 - 40%`，暗色 `#F2F2F2`。
+    pub alt_low: Color,
+    /// 亮色 `#000000`，暗色 `#000000`。
+    pub black_high: Color,
+    /// 亮色 `#FFFFFF`，暗色 `#FFFFFF`。
+    pub white: Color,
 }
 
-fn set_dark_theme(env: &mut Env, _theme: Theme, font: FontFamily) {
-    // Light Base
-    env.set(base::LOW, Color::WHITE.with_alpha(0.2));
-    env.set(base::MEDIUM_LOW, Color::WHITE.with_alpha(0.4));
-    env.set(base::MEDIUM, Color::WHITE.with_alpha(0.6));
-    env.set(base::MEDIUM_HIGH, Color::WHITE.with_alpha(0.8));
-    env.set(base::HIGH, Color::WHITE);
-    // Light Alt
-    env.set(alt::LOW, Color::BLACK.with_alpha(0.2));
-    env.set(alt::MEDIUM_LOW, Color::BLACK.with_alpha(0.4));
-    env.set(alt::MEDIUM, Color::BLACK.with_alpha(0.6));
-    env.set(alt::MEDIUM_HIGH, Color::BLACK.with_alpha(0.8));
-    env.set(alt::HIGH, Color::BLACK);
-    // Chrome
-    env.set(chrome::LOW, Color::Rgba32(0x171717FF));
-    env.set(chrome::MEDIUM_LOW, Color::Rgba32(0x2B2B2BFF));
-    env.set(chrome::MEDIUM, Color::Rgba32(0x1F1F1FFF));
-    env.set(chrome::HIGH, Color::Rgba32(0x767676FF));
-    env.set(chrome::ALT_LOW, Color::Rgba32(0xF2F2F2FF));
-    env.set(chrome::DISABLED_LOW, Color::Rgba32(0x858585FF));
-    env.set(chrome::DISABLED_HIGH, Color::Rgba32(0x333333FF));
-    env.set(chrome::BLACK_LOW, Color::BLACK.with_alpha(0.2));
-    env.set(chrome::WHITE_HIGH, Color::Rgba32(0xFFFFFFFF));
-    env.set(chrome::BLACK_MEDIUM_LOW, Color::BLACK.with_alpha(0.4));
-    env.set(chrome::BLACK_MEDIUM, Color::BLACK.with_alpha(0.8));
-    env.set(chrome::BLACK_HIGH, Color::BLACK);
-    env.set(chrome::WHITE, Color::WHITE);
-    // List
-    env.set(list::ACCENT_HIGH, Color::Rgba32(0x0078D4FF).with_alpha(0.2));
-    env.set(
-        list::ACCENT_MEDIUM,
-        Color::Rgba32(0x0078D4FF).with_alpha(0.4),
-    );
-    env.set(list::ACCENT_LOW, Color::Rgba32(0x0078D4FF).with_alpha(0.6));
-    env.set(list::LIST_LOW, Color::BLACK.with_alpha(0.1));
-    env.set(list::LIST_MEDIUM, Color::BLACK.with_alpha(0.2));
-    // Border
-    env.set(border::EDGE_HIGHTLIGHT, Color::WHITE.with_alpha(0.6));
-    env.set(border::TRANSIENT, Color::BLACK.with_alpha(0.14));
-    // Accent
-    env.set(accent::ACCENT, Color::Rgba32(0x0078D4FF));
-    env.set(accent::ACCENT_1, Color::Rgba32(0x429CE3FF));
-    env.set(accent::ACCENT_DARK_1, Color::Rgba32(0x005A9EFF));
-    env.set(accent::ACCENT_LIGHT_1, Color::Rgba32(0xFF7233FF));
-    // Main
-    env.set(main::PRIMARY, Color::Rgba32(0xF74C00FF));
-    env.set(main::SECONDARY, Color::Rgba32(0xCC3F00FF));
-    env.set(main::TITLE_BAR, Color::Rgba32(0x00000000));
-    // Typography
-    env.set(typography::FONT_COLOR, Color::Rgba32(0xFFFFFFFF));
-
-    env.set(
-        typography::SUBHEADER,
-        FontDescriptor::new(font.to_owned())
-            .with_size(34.)
-            .with_weight(FontWeight::EXTRA_LIGHT),
-    );
-    env.set(
-        typography::HEADER,
-        FontDescriptor::new(font.to_owned())
-            .with_size(46.)
-            .with_weight(FontWeight::EXTRA_LIGHT),
-    );
-
-    env.set(
-        typography::TITLE,
-        FontDescriptor::new(font.to_owned())
-            .with_size(24.)
-            .with_weight(FontWeight::EXTRA_LIGHT),
-    );
-
-    env.set(
-        typography::CAPTION,
-        FontDescriptor::new(font.to_owned())
-            .with_size(12.)
-            .with_weight(FontWeight::LIGHT),
-    );
-    env.set(
-        typography::CAPTION_ALT,
-        FontDescriptor::new(font.to_owned())
-            .with_size(13.)
-            .with_weight(FontWeight::LIGHT),
-    );
-    env.set(
-        typography::BODY,
-        FontDescriptor::new(font.to_owned())
-            .with_size(14.)
-            .with_weight(FontWeight::REGULAR),
-    );
-    env.set(
-        typography::SUBTITLE_ALT,
-        FontDescriptor::new(font.to_owned())
-            .with_size(18.)
-            .with_weight(FontWeight::REGULAR),
-    );
-    env.set(
-        typography::SUBTITLE,
-        FontDescriptor::new(font.to_owned())
-            .with_size(20.)
-            .with_weight(FontWeight::REGULAR),
-    );
-
-    env.set(
-        typography::BASE,
-        FontDescriptor::new(font.to_owned())
-            .with_size(14.)
-            .with_weight(FontWeight::REGULAR),
-    );
-    env.set(
-        typography::BASE_ALT,
-        FontDescriptor::new(font.to_owned())
-            .with_size(14.)
-            .with_weight(FontWeight::SEMI_BOLD),
-    );
-    // Druid Fonts
-    env.set(
-        druid::theme::UI_FONT,
-        FontDescriptor::new(font.to_owned())
-            .with_size(15.)
-            .with_weight(FontWeight::REGULAR),
-    );
-    env.set(
-        druid::theme::UI_FONT_BOLD,
-        FontDescriptor::new(font.to_owned())
-            .with_size(15.)
-            .with_weight(FontWeight::BOLD),
-    );
-    env.set(
-        druid::theme::UI_FONT_ITALIC,
-        FontDescriptor::new(font)
-            .with_size(15.)
-            .with_style(FontStyle::Italic)
-            .with_weight(FontWeight::REGULAR),
-    );
-    // Others
-    env.set(
-        druid::theme::WINDOW_BACKGROUND_COLOR,
-        Color::Rgba32(0x202020FF),
-    );
+/// 列表颜色组合。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ListColors {
+    /// 强调色 20%。
+    pub accent_high: Color,
+    /// 强调色 40%。
+    pub accent_medium: Color,
+    /// 强调色 60%。
+    pub accent_low: Color,
+    /// 亮色 `#000000 - 10%`，暗色 `#000000 - 10%`。
+    pub low: Color,
+    /// 亮色 `#000000 - 20%`，暗色 `#000000 - 20%`。
+    pub medium: Color,
 }
 
-/// 为所给的 [`Env`] 设置组件库的默认配色
+/// 边框颜色组合。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BorderColors {
+    /// 亮色 `#FFFFFF - 60%`，暗色 `#FFFFFF - 5%`。
+    pub edge_highlight: Color,
+    /// 亮色 `#000000 - 14%`，暗色 `#000000 - 36%`。
+    pub transient: Color,
+}
+
+/// 主要强调色组合。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AccentColors {
+    /// 默认强调色。
+    pub accent: Color,
+    /// 较亮的强调色。
+    pub accent_1: Color,
+    /// 较暗的强调色。
+    pub accent_dark_1: Color,
+    /// 更亮的强调色。
+    pub accent_light_1: Color,
+}
+
+/// SCL 自己的品牌色。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MainColors {
+    /// 品牌主色，默认 `#F74C00`。
+    pub primary: Color,
+    /// 品牌次色，默认 `#CC3F00`。
+    pub secondary: Color,
+    /// 标题栏颜色。
+    pub title_bar: Color,
+}
+
+/// 一套完整的 SCL 主题。
 ///
-/// 必须在显示窗口前设置完毕，否则会因为颜色缺失报错
-pub fn set_color_to_env(env: &mut Env, theme: Theme) {
-    let font = get_font();
-    env.set(main::IS_DARK, theme == Theme::Dark);
-    match theme {
-        Theme::Light => set_light_theme(env, theme, font),
-        Theme::Dark => set_dark_theme(env, theme, font),
+/// 所有字段都是 [`Copy`]，因此可以很方便地被 Iced 的样式闭包捕获。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Theme {
+    /// 当前是亮色还是暗色模式。
+    pub mode: Mode,
+    /// 基本颜色。
+    pub base: BaseColors,
+    /// 次颜色。
+    pub alt: AltColors,
+    /// 外壳颜色。
+    pub chrome: ChromeColors,
+    /// 列表颜色。
+    pub list: ListColors,
+    /// 边框颜色。
+    pub border: BorderColors,
+    /// 强调色。
+    pub accent: AccentColors,
+    /// 品牌色。
+    pub main: MainColors,
+    /// 正文字体颜色。
+    pub font_color: Color,
+    /// 窗口背景色。
+    pub window_background: Color,
+    /// 字体配置。
+    pub typography: crate::theme::Typography,
+}
+
+impl Theme {
+    /// 亮色主题。
+    pub const fn light() -> Self {
+        Self {
+            mode: Mode::Light,
+            base: BaseColors {
+                low: Color::from_rgba(0.0, 0.0, 0.0, 0.2),
+                medium_low: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+                medium: Color::from_rgba(0.0, 0.0, 0.0, 0.6),
+                medium_high: Color::from_rgba(0.0, 0.0, 0.0, 0.8),
+                high: Color::BLACK,
+            },
+            alt: AltColors {
+                low: Color::from_rgba(1.0, 1.0, 1.0, 0.2),
+                medium_low: Color::from_rgba(1.0, 1.0, 1.0, 0.4),
+                medium: Color::from_rgba(1.0, 1.0, 1.0, 0.6),
+                medium_high: Color::from_rgba(1.0, 1.0, 1.0, 0.8),
+                high: Color::WHITE,
+            },
+            chrome: ChromeColors {
+                white_high: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+                medium_low: Color::from_rgb8(0xF2, 0xF2, 0xF2),
+                low: Color::from_rgb8(0xF2, 0xF2, 0xF2),
+                disabled_high: Color::from_rgb8(0xCC, 0xCC, 0xCC),
+                medium: Color::from_rgb8(0xE6, 0xE6, 0xE6),
+                high: Color::from_rgb8(0xCC, 0xCC, 0xCC),
+                black_low: Color::from_rgba(0.0, 0.0, 0.0, 0.2),
+                black_medium_low: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+                disabled_low: Color::from_rgb8(0x7A, 0x7A, 0x7A),
+                black_medium: Color::from_rgba(0.0, 0.0, 0.0, 0.8),
+                alt_low: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+                black_high: Color::BLACK,
+                white: Color::WHITE,
+            },
+            list: ListColors {
+                accent_high: Color::from_rgba(0.0, 0.471, 0.831, 0.2),
+                accent_medium: Color::from_rgba(0.0, 0.471, 0.831, 0.4),
+                accent_low: Color::from_rgba(0.0, 0.471, 0.831, 0.6),
+                low: Color::from_rgba(0.0, 0.0, 0.0, 0.1),
+                medium: Color::from_rgba(0.0, 0.0, 0.0, 0.2),
+            },
+            border: BorderColors {
+                edge_highlight: Color::from_rgba(1.0, 1.0, 1.0, 0.6),
+                transient: Color::from_rgba(0.0, 0.0, 0.0, 0.14),
+            },
+            accent: AccentColors {
+                accent: Color::from_rgb8(0xF7, 0x4C, 0x00),
+                accent_1: Color::from_rgb8(0xFF, 0x72, 0x33),
+                accent_dark_1: Color::from_rgb8(0xD2, 0x41, 0x00),
+                accent_light_1: Color::from_rgb8(0xFF, 0x72, 0x33),
+            },
+            main: MainColors {
+                primary: Color::from_rgb8(0xF7, 0x4C, 0x00),
+                secondary: Color::from_rgb8(0xCC, 0x3F, 0x00),
+                title_bar: Color::from_rgba(1.0, 1.0, 1.0, 0.0),
+            },
+            font_color: Color::from_rgb8(0x20, 0x1F, 0x1E),
+            window_background: Color::from_rgb8(0xF3, 0xF3, 0xF3),
+            typography: crate::theme::Typography::new(),
+        }
+    }
+
+    /// 暗色主题。
+    pub const fn dark() -> Self {
+        Self {
+            mode: Mode::Dark,
+            base: BaseColors {
+                low: Color::from_rgba(1.0, 1.0, 1.0, 0.2),
+                medium_low: Color::from_rgba(1.0, 1.0, 1.0, 0.4),
+                medium: Color::from_rgba(1.0, 1.0, 1.0, 0.6),
+                medium_high: Color::from_rgba(1.0, 1.0, 1.0, 0.8),
+                high: Color::WHITE,
+            },
+            alt: AltColors {
+                low: Color::from_rgba(0.0, 0.0, 0.0, 0.2),
+                medium_low: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+                medium: Color::from_rgba(0.0, 0.0, 0.0, 0.6),
+                medium_high: Color::from_rgba(0.0, 0.0, 0.0, 0.8),
+                high: Color::BLACK,
+            },
+            chrome: ChromeColors {
+                white_high: Color::from_rgb8(0xFF, 0xFF, 0xFF),
+                medium_low: Color::from_rgb8(0x2B, 0x2B, 0x2B),
+                low: Color::from_rgb8(0x17, 0x17, 0x17),
+                disabled_high: Color::from_rgb8(0x33, 0x33, 0x33),
+                medium: Color::from_rgb8(0x1F, 0x1F, 0x1F),
+                high: Color::from_rgb8(0x76, 0x76, 0x76),
+                black_low: Color::from_rgba(0.0, 0.0, 0.0, 0.2),
+                black_medium_low: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+                disabled_low: Color::from_rgb8(0x85, 0x85, 0x85),
+                black_medium: Color::from_rgba(0.0, 0.0, 0.0, 0.8),
+                alt_low: Color::from_rgb8(0xF2, 0xF2, 0xF2),
+                black_high: Color::BLACK,
+                white: Color::WHITE,
+            },
+            list: ListColors {
+                accent_high: Color::from_rgba(0.0, 0.471, 0.831, 0.2),
+                accent_medium: Color::from_rgba(0.0, 0.471, 0.831, 0.4),
+                accent_low: Color::from_rgba(0.0, 0.471, 0.831, 0.6),
+                low: Color::from_rgba(0.0, 0.0, 0.0, 0.1),
+                medium: Color::from_rgba(0.0, 0.0, 0.0, 0.2),
+            },
+            border: BorderColors {
+                edge_highlight: Color::from_rgba(1.0, 1.0, 1.0, 0.6),
+                transient: Color::from_rgba(0.0, 0.0, 0.0, 0.14),
+            },
+            accent: AccentColors {
+                accent: Color::from_rgb8(0xF7, 0x4C, 0x00),
+                accent_1: Color::from_rgb8(0xFF, 0x72, 0x33),
+                accent_dark_1: Color::from_rgb8(0xD2, 0x41, 0x00),
+                accent_light_1: Color::from_rgb8(0xFF, 0x72, 0x33),
+            },
+            main: MainColors {
+                primary: Color::from_rgb8(0xF7, 0x4C, 0x00),
+                secondary: Color::from_rgb8(0xCC, 0x3F, 0x00),
+                title_bar: Color::from_rgba(0.0, 0.0, 0.0, 0.0),
+            },
+            font_color: Color::WHITE,
+            window_background: Color::from_rgb8(0x20, 0x20, 0x20),
+            typography: crate::theme::Typography::new(),
+        }
+    }
+
+    /// 是否处于暗色模式。
+    pub const fn is_dark(&self) -> bool {
+        matches!(self.mode, Mode::Dark)
+    }
+
+    /// 切换亮色/暗色模式。
+    pub const fn toggled(&self) -> Self {
+        match self.mode {
+            Mode::Light => Self::dark(),
+            Mode::Dark => Self::light(),
+        }
+    }
+
+    /// 修改品牌主色。
+    pub const fn with_primary(mut self, color: Color) -> Self {
+        self.main.primary = color;
+        self
+    }
+
+    /// 修改品牌次色。
+    pub const fn with_secondary(mut self, color: Color) -> Self {
+        self.main.secondary = color;
+        self
+    }
+
+    /// 修改强调色。
+    pub const fn with_accent(mut self, color: Color) -> Self {
+        self.accent.accent = color;
+        self
+    }
+
+    /// 修改标题栏颜色。
+    pub const fn with_title_bar(mut self, color: Color) -> Self {
+        self.main.title_bar = color;
+        self
+    }
+
+    /// 修改窗口背景色。
+    pub const fn with_window_background(mut self, color: Color) -> Self {
+        self.window_background = color;
+        self
+    }
+
+    /// 转换成 Iced 自己的主题，供内置组件和滚动条使用。
+    pub fn iced_theme(&self) -> IcedTheme {
+        IcedTheme::custom(
+            if self.is_dark() {
+                "SCL Dark"
+            } else {
+                "SCL Light"
+            },
+            iced::theme::Palette {
+                background: self.window_background,
+                text: self.font_color,
+                primary: self.main.primary,
+                success: Color::from_rgb8(0x10, 0x7C, 0x41),
+                warning: Color::from_rgb8(0xF7, 0x63, 0x0C),
+                danger: Color::from_rgb8(0xC4, 0x2B, 0x1C),
+            },
+        )
+    }
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::light()
+    }
+}
+
+/// 根据背景色计算一个对比度足够高的前景色（YIQ 算法）。
+pub fn contrast_color(background: Color) -> Color {
+    let yiq = background.r * 0.299 + background.g * 0.587 + background.b * 0.114;
+    if yiq >= 0.5 {
+        Color::BLACK
+    } else {
+        Color::WHITE
     }
 }

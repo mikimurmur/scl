@@ -24,7 +24,7 @@ pub fn ensure_background_thread() {
 /// 在一个新的线程中运行异步任务
 ///
 /// 这个函数会立即返回，任务的运行结果会通过日志输出。如果需要在任务结束后更新界面，
-/// 请使用 [`druid::ExtEventSink`] 发送命令或通知。
+/// 请使用 [`crate::app::EventSink`] 发送命令或通知。
 #[track_caller]
 pub fn thread_main<F>(future: F)
 where
@@ -68,15 +68,16 @@ where
         .detach();
 }
 
-/// 把一个 `image` 库的图像转换为 Druid 使用的图像缓冲区
-pub fn image_buf_from_dynamic(image: image::DynamicImage) -> anyhow::Result<druid::ImageBuf> {
+/// 把一个 `image` 库的图像转换为 Iced 使用的图像句柄
+pub fn image_handle_from_dynamic(
+    image: image::DynamicImage,
+) -> anyhow::Result<iced::widget::image::Handle> {
     let image = image.to_rgba8();
     let (width, height) = image.dimensions();
-    Ok(druid::ImageBuf::from_raw(
+    Ok(iced::widget::image::Handle::from_rgba(
+        width,
+        height,
         image.into_raw(),
-        druid::piet::ImageFormat::RgbaSeparate,
-        width as usize,
-        height as usize,
     ))
 }
 

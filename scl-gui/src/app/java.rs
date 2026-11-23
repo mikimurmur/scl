@@ -1,13 +1,13 @@
 //! Java 运行时的选择和管理。
 
-use druid::{EventCtx, Target};
+use crate::app::{EventCtx, Target};
 use scl_core::{
-    java::{search_for_java, JavaRuntime},
+    java::{JavaRuntime, search_for_java},
     progress::{ReportState, Reporter},
 };
 
 use crate::{
-    app::{save_config, AppEvent, APP_EVENT},
+    app::{APP_EVENT, AppEvent, save_config},
     app_state::AppState,
     config::JavaRuntimeInfo,
     utils::{progress::Progress, thread::thread_main},

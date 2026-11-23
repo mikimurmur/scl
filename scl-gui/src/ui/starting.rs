@@ -1,16 +1,10 @@
 //! 游戏启动中页面。
 
 use chrono::Datelike;
-use druid::{
-    widget::{Container, Flex, Label, LineBreaking},
-    Color, Env, TextAlignment, Widget, WidgetExt,
-};
-use scl_gui_widgets::{
-    theme::color::typography,
-    widgets::{label, ProgressRing},
-};
+use iced::widget::{column, container, space};
+use iced::{Element, Length};
 
-use crate::app_state::AppState;
+use crate::{app::Message, app_state::AppState, ui::common};
 
 /// 小萧生日（10 月 18 日）当天显示的贴士
 const BIRTHDAY_TIPS: [&str; 3] = [
@@ -82,36 +76,42 @@ pub fn random_tip() -> String {
 }
 
 /// 创建游戏启动中页面
-pub fn ui_builder() -> Box<dyn Widget<AppState>> {
-    let title = label::new("启动游戏中");
+pub fn view(state: &AppState) -> Element<'_, Message> {
+    let theme = state.theme;
 
-    let tip_label = Label::dynamic(|tip: &Option<String>, _: &Env| tip.clone().unwrap_or_default())
-        .with_text_size(13.0)
-        .with_text_color(typography::FONT_COLOR)
-        .with_text_alignment(TextAlignment::Start)
-        .with_line_break_mode(LineBreaking::WordWrap)
-        .padding(8.0);
-    let tip_card = Container::new(tip_label)
-        .rounded(4.0)
-        .border(Color::from_rgba32_u32(0x00000033), 2.0)
-        .expand_width()
-        .lens(AppState::starting_tip);
-
-    Box::new(
-        Flex::column()
-            .with_flex_spacer(1.0)
-            .with_child(ProgressRing::new())
-            .with_default_spacer()
-            .with_child(title)
-            // 官方短贴士 settled 帧：环中心 (149.5,162.3)（环控件 y133..193）、
-            // 标题墨迹 208..220、卡片上沿 332。由上下两个 flex spacer 均分
-            // 剩余空间反推，标题槽位之外需要 16px 固定间距；较长贴士使卡片
-            // 变高时，两个 flex spacer 会同步缩短，环也会随之上移（与官方
-            // 长贴士帧的环位置一致）。
-            .with_spacer(16.0)
-            .with_flex_spacer(1.0)
-            .with_child(tip_card)
-            .expand()
-            .padding(8.0),
+    let tip_card = container(
+        iced::widget::text(state.starting_tip.clone().unwrap_or_default())
+            .size(13.0)
+            .font(theme.typography.caption_alt.font)
+            .color(theme.font_color),
     )
+    .width(Length::Fill)
+    .padding(8)
+    .style(move |_| iced::widget::container::Style {
+        background: Some(iced::Background::Color(iced::Color::TRANSPARENT)),
+        border: iced::Border {
+            radius: 4.0.into(),
+            width: 2.0,
+            color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.2),
+        },
+        ..iced::widget::container::Style::default()
+    });
+
+    column![
+        space().height(Length::Fill),
+        container(common::indeterminate(&theme, state.animation_phase, 4.0))
+            .width(Length::Fixed(120.0)),
+        space().height(Length::Fixed(8.0)),
+        common::label(&theme, "启动游戏中"),
+        space().height(Length::Fixed(16.0)),
+        space().height(Length::Fill),
+        tip_card,
+        space().height(Length::Fixed(8.0)),
+    ]
+    .spacing(0)
+    .align_x(iced::Alignment::Center)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding(8)
+    .into()
 }

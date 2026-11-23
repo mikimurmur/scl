@@ -20,13 +20,12 @@ pub mod version_setting_advance;
 pub mod version_setting_mods;
 pub mod version_setting_remove;
 
-use druid::{widget::EnvScope, Widget};
-use scl_gui_widgets::widgets::{PageSwitcher, ProgressOverlay, WindowWidget};
-pub use scl_gui_widgets::widgets::{
-    ON_PAGE, PUSH_PAGE, QUERY_POP_PAGE, RESET_PAGE_TO, SET_SLIDE_PAGE_ANIMATION,
-};
+use iced::widget::{column, container, row, space};
+use iced::{Alignment, Background, Border, Element, Length, Shadow};
 
-use crate::{app::AppWrapper, app_state::AppState};
+use crate::app::Message;
+pub use crate::app::{PUSH_PAGE, QUERY_POP_PAGE, RESET_PAGE_TO};
+use crate::app_state::AppState;
 
 /// 主页面 ID
 pub const PAGE_MAIN: &str = "main";
@@ -89,216 +88,356 @@ pub const PAGE_LAUNCH_ERROR: &str = "launch_error";
 /// 游戏启动中页面 ID
 pub const PAGE_STARTING: &str = "starting";
 
-/// 创建启动器的根组件
-pub fn root() -> Box<dyn Widget<AppState>> {
-    let pages = PageSwitcher::new()
-        .with_page(PAGE_MAIN, Box::new(|| main::ui_builder()))
-        .with_page(PAGE_VERSION, Box::new(|| version::ui_builder()))
-        .with_page(PAGE_DOWNLOAD, Box::new(|| download::ui_builder()))
-        .with_page(
-            PAGE_DOWNLOAD_VANILLA,
-            Box::new(|| download::vanilla::ui_builder()),
-        )
-        .with_page(
-            PAGE_DOWNLOAD_FABRIC,
-            Box::new(|| download::fabric::ui_builder()),
-        )
-        .with_page(
-            PAGE_DOWNLOAD_QUILTMC,
-            Box::new(|| download::quiltmc::ui_builder()),
-        )
-        .with_page(
-            PAGE_DOWNLOAD_FORGE,
-            Box::new(|| download::forge::ui_builder()),
-        )
-        .with_page(
-            PAGE_DOWNLOAD_NEOFORGE,
-            Box::new(|| download::neoforge::ui_builder()),
-        )
-        .with_page(
-            PAGE_DOWNLOAD_OPTIFINE,
-            Box::new(|| download::optifine::ui_builder()),
-        )
-        .with_page(PAGE_ACCOUNTS, Box::new(|| accounts::ui_builder()))
-        .with_page(PAGE_SETTINGS, Box::new(|| settings::ui_builder()))
-        .with_page(
-            PAGE_SETTINGS_JAVA,
-            Box::new(|| settings::java::ui_builder()),
-        )
-        .with_page(PAGE_UPDATE_LOG, Box::new(|| settings::update::ui_builder()))
-        .with_page(PAGE_GAME_DIR, Box::new(|| game_dir::ui_builder()))
-        .with_page(PAGE_LOGIN_METHODS, Box::new(|| login_methods::ui_builder()))
-        .with_page(
-            PAGE_LOGIN_OFFLINE,
-            Box::new(|| login::offline::ui_builder()),
-        )
-        .with_page(
-            PAGE_LOGIN_MICROSOFT,
-            Box::new(|| login::microsoft::ui_builder()),
-        )
-        .with_page(
-            PAGE_LOGIN_AUTHLIB,
-            Box::new(|| login::authlib::ui_builder()),
-        )
-        .with_page(
-            PAGE_LOGIN_AUTHLIB_SELECT,
-            Box::new(|| login::authlib_select::ui_builder()),
-        )
-        .with_page(
-            PAGE_VERSION_SETTING,
-            Box::new(|| version_setting::ui_builder()),
-        )
-        .with_page(
-            PAGE_VERSION_SETTING_MODS,
-            Box::new(|| version_setting_mods::ui_builder()),
-        )
-        .with_page(
-            PAGE_VERSION_SETTING_ADVANCE,
-            Box::new(|| version_setting_advance::ui_builder()),
-        )
-        .with_page(
-            PAGE_VERSION_SETTING_REMOVE,
-            Box::new(|| version_setting_remove::ui_builder()),
-        )
-        .with_page(PAGE_MODS_DOWNLOAD, Box::new(|| mods_download::ui_builder()))
-        .with_page(
-            PAGE_MODS_DOWNLOAD_CURSEFORGE,
-            Box::new(|| mods_download_curseforge::ui_builder()),
-        )
-        .with_page(
-            PAGE_MODS_DOWNLOAD_MODRINTH,
-            Box::new(|| mods_download_modrinth::ui_builder()),
-        )
-        .with_page(
-            PAGE_MOD_FILE_DOWNLOAD,
-            Box::new(|| mod_files_download::ui_builder()),
-        )
-        .with_page(
-            PAGE_MOD_DOWNLOAD_DEST,
-            Box::new(|| mod_download_dest::ui_builder()),
-        )
-        .with_page(PAGE_LAUNCH_ERROR, Box::new(|| launch_error::ui_builder()))
-        .with_page(PAGE_STARTING, Box::new(|| starting::ui_builder()));
+/// 页面中的文本输入框字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextField {
+    /// 版本搜索。
+    VersionsFilter,
+    /// 下载页的版本名称。
+    DownloadVersionName,
+    /// 版本设置页的重命名输入框。
+    VersionRename,
+    /// 版本模组搜索。
+    VersionModsFilter,
+    /// 账户搜索。
+    AccountsFilter,
+    /// 离线登录用户名。
+    OfflineName,
+    /// 离线登录 UUID。
+    OfflineUuid,
+    /// Authlib 服务器地址。
+    AuthlibServer,
+    /// Authlib 用户名。
+    AuthlibUser,
+    /// Authlib 密码。
+    AuthlibPassword,
+    /// CurseForge 搜索。
+    CurseforgeFilter,
+    /// Modrinth 搜索。
+    ModrinthFilter,
+    /// 全局内存。
+    GlobalMemory,
+    /// 全局 JVM 参数。
+    JvmArgs,
+    /// 全局游戏参数。
+    GameArgs,
+    /// 包装程序路径。
+    WrapperPath,
+    /// 包装程序参数。
+    WrapperArgs,
+    /// 版本 JVM 参数。
+    VersionJvmArgs,
+    /// 版本游戏参数。
+    VersionGameArgs,
+    /// 版本 Java 路径。
+    VersionJavaPath,
+    /// 版本窗口标题。
+    VersionWindowTitle,
+    /// 版本包装程序路径。
+    VersionWrapperPath,
+    /// 版本包装程序参数。
+    VersionWrapperArgs,
+    /// 版本内存文本。
+    VersionMaxMemory,
+}
 
-    let mock_pages: Vec<&'static str> = std::env::var("SCL_MOCK_PAGE")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|page| !page.is_empty())
-        .map(|page| Box::leak(page.to_owned().into_boxed_str()) as &'static str)
-        .collect();
-    // SCL_MOCK_AUTOSTART：窗口就绪后自动提交启动命令（E2E 用，输入管道不可用
-    // 时也能走完整启动流程），与其它 SCL_MOCK_* 测试挂钩同一模式。
-    let mock_autostart = std::env::var_os("SCL_MOCK_AUTOSTART").is_some();
+/// 页面中的开关字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoolField {
+    /// 黑暗模式。
+    DarkTheme,
+    /// 页面切换动画。
+    SlideAnimation,
+    /// 自动调节内存。
+    AutoMemory,
+    /// 等待游戏窗口出现。
+    WaitUntilLaunched,
+    /// 启动后不关闭启动器。
+    DontCloseWindow,
+    /// 启动后隐藏启动器。
+    HideWindow,
+    /// 自动检查文件完整性。
+    AutoRecheck,
+    /// 使用独立版本设置。
+    VersionEnable,
+    /// 使用版本隔离。
+    VersionIndependent,
+    /// 版本手动内存。
+    VersionOverrideMemory,
+}
 
-    let pages: Box<dyn Widget<AppState>> = if mock_pages.is_empty() && !mock_autostart {
-        Box::new(pages)
-    } else {
-        Box::new(MockNavigator::new(pages, mock_pages, mock_autostart))
+/// 页面中的单选字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoiceField {
+    /// 版本隔离方式。
+    VersionIndependentMethod,
+    /// 下载源。
+    DownloadSource,
+}
+
+/// 页面控件发出的消息。
+#[derive(Debug, Clone)]
+pub enum UiMessage {
+    /// 文本输入。
+    Text(TextField, String),
+    /// 开关切换。
+    Bool(BoolField, bool),
+    /// 单选选项。
+    Choice(ChoiceField, usize),
+    /// 切换版本排序方式。
+    ToggleSort,
+    /// 折叠/展开一个版本分组。
+    ToggleFolder(String),
+    /// 启用/禁用一个模组。
+    ToggleMod {
+        /// 模组文件路径。
+        path: String,
+        /// 是否启用。
+        enabled: bool,
+    },
+    /// 选择一个加载器版本并返回上一页。
+    SelectLoaderVersion {
+        /// 加载器类型：fabric / quiltmc / forge / neoforge / optifine。
+        kind: &'static str,
+        /// 版本名称。
+        version: String,
+    },
+    /// 选择一个原版版本并返回上一页。
+    SelectVanillaVersion(String),
+    /// 切换设置页分页。
+    SetSettingPage(usize),
+    /// 设置下载并发数。
+    SetParallel(usize),
+    /// 复制文本到剪切板。
+    CopyText(String),
+    /// 打开模组下载页。
+    OpenModsPage,
+    /// 打开版本目录。
+    OpenVersionDir(Option<&'static str>),
+    /// 把当前模组安装到指定版本。
+    InstallMod(String),
+    /// 重新检查启动器更新。
+    CheckUpdate,
+}
+
+/// 创建启动器的根视图。
+pub fn view(state: &AppState) -> Element<'_, Message> {
+    let theme = state.theme;
+    let page = match *state.pages.current() {
+        PAGE_MAIN => self::main_view(state),
+        PAGE_VERSION => version::view(state),
+        PAGE_DOWNLOAD => download::view(state),
+        PAGE_DOWNLOAD_VANILLA => download::vanilla::view(state),
+        PAGE_DOWNLOAD_FABRIC => download::fabric::view(state),
+        PAGE_DOWNLOAD_QUILTMC => download::quiltmc::view(state),
+        PAGE_DOWNLOAD_FORGE => download::forge::view(state),
+        PAGE_DOWNLOAD_NEOFORGE => download::neoforge::view(state),
+        PAGE_DOWNLOAD_OPTIFINE => download::optifine::view(state),
+        PAGE_ACCOUNTS => accounts::view(state),
+        PAGE_SETTINGS => settings::view(state),
+        PAGE_SETTINGS_JAVA => settings::java::view(state),
+        PAGE_UPDATE_LOG => settings::update::view(state),
+        PAGE_GAME_DIR => game_dir::view(state),
+        PAGE_LOGIN_METHODS => login_methods::view(state),
+        PAGE_LOGIN_OFFLINE => login::offline::view(state),
+        PAGE_LOGIN_MICROSOFT => login::microsoft::view(state),
+        PAGE_LOGIN_AUTHLIB => login::authlib::view(state),
+        PAGE_LOGIN_AUTHLIB_SELECT => login::authlib_select::view(state),
+        PAGE_VERSION_SETTING => version_setting::view(state),
+        PAGE_VERSION_SETTING_MODS => version_setting_mods::view(state),
+        PAGE_VERSION_SETTING_ADVANCE => version_setting_advance::view(state),
+        PAGE_VERSION_SETTING_REMOVE => version_setting_remove::view(state),
+        PAGE_MODS_DOWNLOAD => mods_download::view(state),
+        PAGE_MODS_DOWNLOAD_CURSEFORGE => mods_download_curseforge::view(state),
+        PAGE_MODS_DOWNLOAD_MODRINTH => mods_download_modrinth::view(state),
+        PAGE_MOD_FILE_DOWNLOAD => mod_files_download::view(state),
+        PAGE_MOD_DOWNLOAD_DEST => mod_download_dest::view(state),
+        PAGE_LAUNCH_ERROR => launch_error::view(state),
+        PAGE_STARTING => starting::view(state),
+        _ => self::main_view(state),
     };
 
-    let window = EnvScope::new(
-        |env, data: &AppState| crate::config_env(&data.config, env),
-        WindowWidget::new("Sharp Craft Launcher", pages),
+    let content = container(page)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| iced::widget::container::Style {
+            background: Some(Background::Color(theme.window_background)),
+            ..iced::widget::container::Style::default()
+        });
+
+    let show_back = state.pages.can_go_back() && state.back_enabled;
+    let shell = scl_gui_widgets::widgets::window_shell(
+        &theme,
+        "Sharp Craft Launcher",
+        show_back,
+        content,
+        Message::Window,
     );
 
-    Box::new(AppWrapper::new(
-        ProgressOverlay::new(window).show_progress_on_taskbar(),
-    ))
+    let mut root: Element<'_, Message> = shell;
+
+    if !state.progress.is_empty() {
+        let overlay = progress_overlay(state);
+        root = iced::widget::stack![
+            root,
+            container(overlay)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_y(iced::alignment::Vertical::Bottom)
+                .align_x(iced::alignment::Horizontal::Center)
+        ]
+        .into();
+    }
+
+    if state.async_error.is_some() {
+        let modal = async_error_modal(state);
+        root = iced::widget::stack![
+            root,
+            container(modal)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .style(|_| iced::widget::container::Style {
+                    background: Some(Background::Color(iced::Color::from_rgba(
+                        0.0, 0.0, 0.0, 0.45
+                    ))),
+                    ..iced::widget::container::Style::default()
+                })
+        ]
+        .into();
+    }
+
+    root
 }
 
-/// 无交互逐页截图用的页面驱动器：按 [`SCL_MOCK_PAGE`] 给出的顺序依次推送页面。
-struct MockNavigator {
-    child: Box<dyn Widget<AppState>>,
-    pages: Vec<&'static str>,
-    next: usize,
-    autostart: bool,
+fn main_view(state: &AppState) -> Element<'_, Message> {
+    // 主页在 ui::main 中实现，这里转接以保持页面路由集中。
+    crate::ui::main::view(state)
 }
 
-impl MockNavigator {
-    fn new(
-        child: impl Widget<AppState> + 'static,
-        pages: Vec<&'static str>,
-        autostart: bool,
-    ) -> Self {
-        Self {
-            child: Box::new(child),
-            pages,
-            next: 0,
-            autostart,
+fn progress_overlay(state: &AppState) -> Element<'_, Message> {
+    let theme = state.theme;
+    let mut entries = column![].spacing(8);
+
+    for entry in state.progress.values() {
+        let title = if entry.message.is_empty() {
+            "正在处理……".to_owned()
+        } else {
+            entry.message.clone()
+        };
+
+        let right = if !entry.sub_message.is_empty() {
+            entry.sub_message.clone()
+        } else if let Some(max) = entry.max {
+            format!("{}/{}", entry.current.round(), max.round())
+        } else {
+            String::new()
+        };
+
+        let ratio = entry
+            .max
+            .filter(|max| *max > 0.0)
+            .map(|max| (entry.current / max).clamp(0.0, 1.0) as f32);
+
+        let mut item = column![
+            row![
+                iced::widget::text(title)
+                    .size(12.0)
+                    .font(theme.typography.base.font)
+                    .color(theme.base.high),
+                space().width(Length::Fill),
+                iced::widget::text(right)
+                    .size(12.0)
+                    .font(theme.typography.base.font)
+                    .color(theme.base.high),
+            ]
+            .align_y(Alignment::Center)
+        ]
+        .spacing(4);
+
+        if let Some(ratio) = ratio {
+            item = item.push(common::progress(&theme, ratio, 4.0));
+        } else {
+            item = item.push(common::indeterminate(&theme, state.animation_phase, 4.0));
         }
+
+        entries = entries.push(item);
     }
+
+    container(entries)
+        .width(Length::Fill)
+        .padding([8, 12])
+        .style(move |_| iced::widget::container::Style {
+            background: Some(Background::Color(theme.chrome.medium_low)),
+            border: Border {
+                radius: 0.0.into(),
+                width: 1.0,
+                color: theme.border.transient,
+            },
+            shadow: Shadow::default(),
+            ..iced::widget::container::Style::default()
+        })
+        .into()
 }
 
-impl Widget<AppState> for MockNavigator {
-    fn event(
-        &mut self,
-        ctx: &mut druid::EventCtx,
-        event: &druid::Event,
-        data: &mut AppState,
-        env: &druid::Env,
-    ) {
-        if self.autostart && matches!(event, druid::Event::WindowConnected) {
-            self.autostart = false;
-            ctx.submit_command(crate::app::START_GAME.to(druid::Target::Global));
-        }
-        if matches!(
-            event,
-            druid::Event::WindowConnected | druid::Event::Timer(_)
-        ) && self.next < self.pages.len()
-        {
-            tracing::debug!(
-                "test hook SCL_MOCK_PAGE: auto push {:?}",
-                self.pages[self.next]
-            );
-            ctx.submit_command(
-                PUSH_PAGE
-                    .with(self.pages[self.next])
-                    .to(druid::Target::Global),
-            );
-            self.next += 1;
-            ctx.request_timer(std::time::Duration::from_millis(150));
-        }
-        self.child.event(ctx, event, data, env);
-    }
+fn async_error_modal(state: &AppState) -> Element<'_, Message> {
+    let theme = state.theme;
+    let (location, error) = state.async_error.clone().unwrap_or_default();
 
-    fn lifecycle(
-        &mut self,
-        ctx: &mut druid::LifeCycleCtx,
-        event: &druid::LifeCycle,
-        data: &AppState,
-        env: &druid::Env,
-    ) {
-        self.child.lifecycle(ctx, event, data, env);
-    }
+    let body = format!(
+        "执行位于 {location} 的后台异步任务时发生错误：\n{error}\n\n\
+         这个错误不会使程序崩溃，但是可能会重要，是否将此错误复制到剪切板？"
+    );
 
-    fn update(
-        &mut self,
-        ctx: &mut druid::UpdateCtx,
-        old_data: &AppState,
-        data: &AppState,
-        env: &druid::Env,
-    ) {
-        self.child.update(ctx, old_data, data, env);
-    }
+    let buttons = row![
+        common::button(
+            &theme,
+            "关闭",
+            scl_gui_widgets::widgets::ButtonKind::Standard,
+            Message::DismissAsyncError,
+        ),
+        common::button(
+            &theme,
+            "复制并关闭",
+            scl_gui_widgets::widgets::ButtonKind::Accent,
+            Message::CopyAsyncError,
+        ),
+    ]
+    .spacing(8);
 
-    fn layout(
-        &mut self,
-        ctx: &mut druid::LayoutCtx,
-        bc: &druid::BoxConstraints,
-        data: &AppState,
-        env: &druid::Env,
-    ) -> druid::Size {
-        self.child.layout(ctx, bc, data, env)
-    }
-
-    fn paint(&mut self, ctx: &mut druid::PaintCtx, data: &AppState, env: &druid::Env) {
-        self.child.paint(ctx, data, env);
-    }
-
-    fn id(&self) -> Option<druid::WidgetId> {
-        self.child.id()
-    }
+    container(
+        column![
+            iced::widget::text("执行异步任务发生错误")
+                .size(theme.typography.subtitle_alt.size)
+                .font(theme.typography.subtitle_alt.font)
+                .color(theme.font_color),
+            iced::widget::text(body)
+                .size(theme.typography.base.size)
+                .font(theme.typography.base.font)
+                .color(theme.font_color),
+            space().height(Length::Fixed(4.0)),
+            buttons,
+        ]
+        .spacing(10),
+    )
+    .width(Length::Fixed(300.0))
+    .padding(16)
+    .style(move |_| iced::widget::container::Style {
+        background: Some(Background::Color(theme.chrome.medium_low)),
+        border: Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: theme.border.transient,
+        },
+        shadow: Shadow {
+            color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..iced::widget::container::Style::default()
+    })
+    .into()
 }
 
 pub mod main;

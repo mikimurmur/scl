@@ -19,7 +19,8 @@ fn load_dotenv() {
         let key = key.trim();
         let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
         if !key.is_empty() && env::var_os(key).is_none() {
-            env::set_var(key, value);
+            // 构建脚本是单线程的，且此处只读取 .env 后设置环境变量。
+            unsafe { env::set_var(key, value) };
         }
     }
 }

@@ -1,63 +1,27 @@
-//! SCL 组件库主模块
-//!
-//! 所有的组件都在这里
+//! 迁移后的组件集合。
 
-mod autofocus;
 mod button;
-pub(crate) mod common;
-mod create_item;
-mod download_module_item;
-mod dynimage;
-mod folder;
-mod icon;
+mod common;
+mod container;
 mod icon_button;
-pub mod label;
-mod large_list_item;
 mod list_item;
-mod list_select;
-mod menu_item;
-mod navigation_control;
-mod on_change;
-mod on_cmd;
-mod on_notify;
+mod navigation;
 mod page_switcher;
-mod password;
-mod press_key;
 mod progress;
-mod progress_overlay;
-mod radio;
-mod show_if;
 mod slider;
-mod start_button;
-mod store;
-mod template;
+mod text_input;
 mod toggle_switch;
 mod window;
-pub use autofocus::*;
-pub use button::Button;
-pub use create_item::*;
-pub use download_module_item::*;
-pub use dynimage::*;
-pub use folder::*;
-pub use icon::Icon;
-pub use icon_button::IconButton;
-pub use large_list_item::*;
+
+pub use button::*;
+pub use common::ButtonKind;
+pub use container::*;
+pub use icon_button::*;
 pub use list_item::ListItem;
-pub use list_select::*;
-pub use menu_item::*;
-pub use navigation_control::*;
-pub use on_change::*;
-pub use on_cmd::*;
-pub use on_notify::*;
-pub use page_switcher::*;
-pub use password::*;
-pub use press_key::*;
+pub use navigation::*;
+pub use page_switcher::PageSwitcher;
 pub use progress::*;
-pub use progress_overlay::*;
-pub use radio::*;
-pub use show_if::*;
 pub use slider::*;
-pub use start_button::*;
-pub use store::*;
+pub use text_input::*;
 pub use toggle_switch::*;
 pub use window::*;

@@ -1,4 +1,7 @@
-//! 主题相关的模块，包括对颜色、字体、图标的定义和使用
+//! 颜色与字体主题。
 
-pub mod color;
-pub mod icons;
+mod color;
+mod typography;
+
+pub use color::*;
+pub use typography::*;

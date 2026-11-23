@@ -1,9 +1,9 @@
 //! 设置页面的后台逻辑。
 
-use druid::{EventCtx, Target};
+use crate::app::{EventCtx, Target};
 
 use crate::{
-    app::{AppEvent, APP_EVENT},
+    app::{APP_EVENT, AppEvent},
     app_state::AppState,
     utils::{thread::thread_main, update},
 };

@@ -2,11 +2,11 @@
 
 use std::time::Duration;
 
-use druid::{EventCtx, Target};
+use crate::app::{EventCtx, Target};
 use scl_core::auth::microsoft::MicrosoftOAuth;
 
 use crate::{
-    app::{AppEvent, APP_EVENT},
+    app::{APP_EVENT, AppEvent},
     app_state::AppState,
     core::CoreTransformer,
     utils::thread::thread_main,

@@ -1,12 +1,14 @@
 //! 游戏启动失败页面。
 
-use druid::{
-    widget::{Flex, Scroll},
-    Env, Widget, WidgetExt,
-};
-use scl_gui_widgets::widgets::label;
+use iced::widget::{column, container, row, space};
+use iced::{Alignment, Element, Length};
+use scl_gui_widgets::widgets::ButtonKind;
 
-use crate::{app_state::AppState, ui::common, utils::open_url::open_url};
+use crate::{
+    app::{Message, OPEN_URL},
+    app_state::AppState,
+    ui::{UiMessage, common},
+};
 
 fn collect_logs(data: &AppState) -> String {
     if data.launch_error_logs.is_empty() {
@@ -33,48 +35,60 @@ fn latest_log_path(data: &AppState) -> std::path::PathBuf {
     }
     let logs = game_dir.join("logs");
     let latest = logs.join("latest.log");
-    if latest.exists() {
-        latest
-    } else {
-        logs
-    }
+    if latest.exists() { latest } else { logs }
 }
 
 /// 创建游戏启动失败页面
-pub fn ui_builder() -> Box<dyn Widget<AppState>> {
-    // 原版失败页的三个文本都是 label::new 的默认样式（BASE 13px、自动换行），
-    // 没有额外设置字体/字号/颜色；padding 统一为 5。
-    let title = label::new("游戏启动了，但是出错了……").padding(5.);
+pub fn view(state: &AppState) -> Element<'_, Message> {
+    let theme = state.theme;
+    let logs = collect_logs(state);
 
-    let desc = label::new(
+    let title = container(common::label(&theme, "游戏启动了，但是出错了……")).padding(5);
+
+    let desc = container(common::label(
+        &theme,
         "虽然 SCL 已经尽力保证游戏去顺利启动了，但问\n\
          题还是发生了。\n\
          你可以检查以下日志，以确认问题根源。\n\
          你也可以打开日志文件以向他人询问如何解决。",
-    )
-    .padding(5.);
+    ))
+    .padding(5);
 
-    let logs = label::dynamic(|data: &AppState, _: &Env| collect_logs(data)).padding(5.);
+    let logs_text = iced::widget::text(logs.clone())
+        .size(theme.typography.base.size)
+        .font(theme.typography.base.font)
+        .color(theme.font_color);
 
-    let open_log = common::button("打开日志文件").on_click(|_ctx, data, _env| {
-        let path = latest_log_path(data);
-        let _ = open_url(&path.to_string_lossy());
-    });
-    let copy_logs = common::button("复制到剪切板").on_click(|_ctx, data, _env| {
-        crate::panic::copy_to_clipboard(collect_logs(data));
-    });
+    let open_log = container(common::button(
+        &theme,
+        "打开日志文件",
+        ButtonKind::Standard,
+        common::command(
+            OPEN_URL,
+            latest_log_path(state).to_string_lossy().to_string(),
+        ),
+    ))
+    .width(Length::FillPortion(1));
+    let copy_logs = container(common::button(
+        &theme,
+        "复制到剪切板",
+        ButtonKind::Standard,
+        Message::Ui(UiMessage::CopyText(logs)),
+    ))
+    .width(Length::FillPortion(1));
 
-    let buttons = Flex::row()
-        .with_flex_child(open_log.expand_width(), 1.0)
-        .with_spacer(5.)
-        .with_flex_child(copy_logs.expand_width(), 1.0);
+    let buttons =
+        row![open_log, space().width(Length::Fixed(5.0)), copy_logs,].align_y(Alignment::Center);
 
-    let content = Flex::column()
-        .cross_axis_alignment(druid::widget::CrossAxisAlignment::Start)
-        .with_child(title)
-        .with_child(desc)
-        .with_flex_child(Scroll::new(logs).vertical().expand(), 1.0)
-        .with_child(buttons);
-
-    Box::new(content.padding(5.))
+    column![
+        title,
+        desc,
+        container(common::scroll(&theme, container(logs_text).padding(5))).height(Length::Fill),
+        buttons,
+    ]
+    .spacing(4)
+    .padding(5)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }

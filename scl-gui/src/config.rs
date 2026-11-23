@@ -6,9 +6,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use druid::{Color, Data, Lens};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+
+use scl_gui_widgets::theme::ThemeColor;
 
 use crate::{
     core::{AuthMethod, DownloadSource, VersionType},
@@ -16,7 +17,7 @@ use crate::{
 };
 
 /// 启动器配置文件
-#[derive(Debug, Clone, Data, Lens, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
     /// 账户数据（官方不写入本文件，仅存 `~/.scl/auth_data.json`；
@@ -169,7 +170,7 @@ impl Config {
 }
 
 /// 一个 Minecraft 文件夹
-#[derive(Debug, Clone, Data, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum MinecraftFolder {
     /// 当前目录下的 `.minecraft`
     #[default]
@@ -208,7 +209,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// 主题设置
-#[derive(Debug, Clone, Data, Lens, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct ThemeConfig {
     /// 是否使用黑暗模式
@@ -227,28 +228,28 @@ pub struct ThemeConfig {
     pub theme_background_image_path: String,
     /// 次要颜色
     #[serde(default, with = "color_serde", skip_serializing_if = "Option::is_none")]
-    pub theme_color_secondary: Option<Color>,
+    pub theme_color_secondary: Option<ThemeColor>,
     /// 主要颜色
     #[serde(default, with = "color_serde", skip_serializing_if = "Option::is_none")]
-    pub theme_color_primary: Option<Color>,
+    pub theme_color_primary: Option<ThemeColor>,
     /// 强调色
     #[serde(default, with = "color_serde", skip_serializing_if = "Option::is_none")]
-    pub theme_color_accent: Option<Color>,
+    pub theme_color_accent: Option<ThemeColor>,
     /// 强调色 1
     #[serde(default, with = "color_serde", skip_serializing_if = "Option::is_none")]
-    pub theme_color_accent_1: Option<Color>,
+    pub theme_color_accent_1: Option<ThemeColor>,
     /// 深强调色
     #[serde(default, with = "color_serde", skip_serializing_if = "Option::is_none")]
-    pub theme_color_accent_dark_1: Option<Color>,
+    pub theme_color_accent_dark_1: Option<ThemeColor>,
     /// 浅强调色
     #[serde(default, with = "color_serde", skip_serializing_if = "Option::is_none")]
-    pub theme_color_accent_light_1: Option<Color>,
+    pub theme_color_accent_light_1: Option<ThemeColor>,
     /// 标题栏颜色
     #[serde(default, with = "color_serde", skip_serializing_if = "Option::is_none")]
-    pub theme_color_title_bar: Option<Color>,
+    pub theme_color_title_bar: Option<ThemeColor>,
     /// 背景颜色
     #[serde(default, with = "color_serde", skip_serializing_if = "Option::is_none")]
-    pub theme_color_background: Option<Color>,
+    pub theme_color_background: Option<ThemeColor>,
 }
 
 /// 颜色字段的序列化模块。
@@ -256,8 +257,8 @@ pub struct ThemeConfig {
 /// 配置文件中颜色使用 `#RRGGBBAA` 字符串保存，同时也兼容旧版本的
 /// `[r, g, b, a]` 数组格式。
 mod color_serde {
-    use druid::Color;
-    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
+    use scl_gui_widgets::theme::ThemeColor;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
 
     #[derive(Deserialize)]
     #[serde(untagged)]
@@ -267,7 +268,7 @@ mod color_serde {
         Floats([f64; 4]),
     }
 
-    pub fn serialize<S>(value: &Option<Color>, serializer: S) -> Result<S::Ok, S::Error>
+    pub fn serialize<S>(value: &Option<ThemeColor>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -280,7 +281,7 @@ mod color_serde {
         }
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Color>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<ThemeColor>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -290,17 +291,27 @@ mod color_serde {
             Some(ColorRepr::Hex(text)) => parse_hex(&text)
                 .map(Some)
                 .ok_or_else(|| D::Error::custom(format!("无效的颜色值：{text}"))),
-            Some(ColorRepr::Bytes([r, g, b, a])) => Ok(Some(Color::rgba8(r, g, b, a))),
-            Some(ColorRepr::Floats([r, g, b, a])) => Ok(Some(Color::rgba(r, g, b, a))),
+            Some(ColorRepr::Bytes([r, g, b, a])) => Ok(Some(ThemeColor::from_rgba8(r, g, b, a))),
+            Some(ColorRepr::Floats([r, g, b, a])) => Ok(Some(ThemeColor::from_rgba8(
+                (r.clamp(0.0, 1.0) * 255.0).round() as u8,
+                (g.clamp(0.0, 1.0) * 255.0).round() as u8,
+                (b.clamp(0.0, 1.0) * 255.0).round() as u8,
+                (a.clamp(0.0, 1.0) * 255.0).round() as u8,
+            ))),
         }
     }
 
-    fn parse_hex(text: &str) -> Option<Color> {
+    fn parse_hex(text: &str) -> Option<ThemeColor> {
         let hex = text.trim().trim_start_matches('#');
         let parse = |range: std::ops::Range<usize>| u8::from_str_radix(hex.get(range)?, 16).ok();
         match hex.len() {
-            6 => Some(Color::rgb8(parse(0..2)?, parse(2..4)?, parse(4..6)?)),
-            8 => Some(Color::rgba8(
+            6 => Some(ThemeColor::from_rgba8(
+                parse(0..2)?,
+                parse(2..4)?,
+                parse(4..6)?,
+                0xFF,
+            )),
+            8 => Some(ThemeColor::from_rgba8(
                 parse(0..2)?,
                 parse(2..4)?,
                 parse(4..6)?,
@@ -308,10 +319,11 @@ mod color_serde {
             )),
             3 => {
                 let expand = |value: &str| u8::from_str_radix(&format!("{value}{value}"), 16).ok();
-                Some(Color::rgb8(
+                Some(ThemeColor::from_rgba8(
                     expand(hex.get(0..1)?)?,
                     expand(hex.get(1..2)?)?,
                     expand(hex.get(2..3)?)?,
+                    0xFF,
                 ))
             }
             _ => None,
@@ -320,7 +332,7 @@ mod color_serde {
 }
 
 /// 账户数据
-#[derive(Debug, Clone, Data, Lens, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct AccountData {
     /// 当前选中的账户索引
@@ -330,7 +342,7 @@ pub struct AccountData {
 }
 
 /// Java 运行时数据
-#[derive(Debug, Clone, Data, Lens, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct JavaListData {
     /// 选中的 Java 8 运行时路径
@@ -386,7 +398,7 @@ impl Default for JavaListData {
 }
 
 /// 一个 Java 运行时
-#[derive(Debug, Clone, Data, Lens, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct JavaRuntimeInfo {
     /// Java 可执行文件路径
     pub path: String,
@@ -492,7 +504,7 @@ impl JavaRuntimeInfo {
 }
 
 /// 版本独立方案
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Data, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum VersionIndependentMethod {
     /// 不使用版本独立
     #[default]
@@ -558,7 +570,7 @@ pub fn get_config_sync() -> anyhow::Result<Config> {
             return Ok(Config::default());
         }
         Err(err) => {
-            return Err(err).with_context(|| format!("读取配置文件 {} 失败", path.display()))
+            return Err(err).with_context(|| format!("读取配置文件 {} 失败", path.display()));
         }
     };
     let config: Config = serde_json::from_str(data.trim_start_matches('\u{feff}'))
@@ -708,8 +720,22 @@ fn generate_client_token() -> String {
     // 例如 2275955bdb930d290304a4e08f7bdb5d。
     format!(
         "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
     )
 }
 
@@ -825,10 +851,14 @@ mod should_apply_tests {
                 "Release 版本无论类型都应视为正式版：{version_type:?}"
             );
         }
-        assert!(VersionIndependentMethod::IndependentForNonRelease
-            .should_apply(&snapshot, VersionType::Vanilla));
-        assert!(VersionIndependentMethod::IndependentForNonRelease
-            .should_apply(&custom, VersionType::Vanilla));
+        assert!(
+            VersionIndependentMethod::IndependentForNonRelease
+                .should_apply(&snapshot, VersionType::Vanilla)
+        );
+        assert!(
+            VersionIndependentMethod::IndependentForNonRelease
+                .should_apply(&custom, VersionType::Vanilla)
+        );
     }
 
     #[test]

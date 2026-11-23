@@ -1,132 +1,96 @@
 //! Microsoft 正版登录页面。
 
-use druid::{
-    widget::{Flex, ViewSwitcher},
-    Env, Target, Widget, WidgetExt,
+use iced::widget::{column, container, row, space};
+use iced::{Alignment, Element, Length};
+
+use crate::{
+    app::{Message, OPEN_URL},
+    app_state::AppState,
+    ui::{UiMessage, common},
 };
-use scl_gui_widgets::{
-    theme::color::main,
-    widgets::{label, ProgressRing},
-};
 
-use crate::{app::OPEN_URL, app_state::AppState, panic::copy_to_clipboard};
-
-/// Microsoft 登录页面的显示状态
-#[derive(Debug, Clone, Copy, PartialEq, Eq, druid::Data)]
-enum PageState {
-    /// 登录失败，显示错误信息
-    Error,
-    /// 正在获取用户代码
-    Loading,
-    /// 已获取用户代码，等待用户完成验证
-    Code,
-    /// 验证成功，正在登录
-    Success,
-}
-
-fn page_state(data: &AppState, _: &Env) -> PageState {
-    if data
-        .login_error
-        .as_ref()
-        .is_some_and(|error| !error.is_empty())
-    {
-        PageState::Error
-    } else if data.login_microsoft_code.is_empty() {
-        PageState::Loading
-    } else if data.login_microsoft_success {
-        PageState::Success
-    } else {
-        PageState::Code
-    }
-}
-
-/// 创建加载中 / 验证成功时显示的页面
-fn progress_view(text: &'static str) -> Box<dyn Widget<AppState>> {
-    Box::new(
-        Flex::column()
-            .with_flex_spacer(1.)
-            .with_child(ProgressRing::new())
-            .with_spacer(10.)
-            .with_child(label::new(text))
-            .with_flex_spacer(1.),
+fn progress_view<'a>(state: &AppState, text: &str) -> Element<'a, Message> {
+    let theme = state.theme;
+    container(
+        column![common::loading(&theme, state.animation_phase, text),]
+            .width(Length::Fill)
+            .height(Length::Fill),
     )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 /// 创建 Microsoft 登录页面
-pub fn ui_builder() -> Box<dyn Widget<AppState>> {
-    let views = ViewSwitcher::new(
-        page_state,
-        |state: &PageState, _data: &AppState, _env: &Env| -> Box<dyn Widget<AppState>> {
-            match state {
-                PageState::Error => Box::new(
-                    Flex::column()
-                        .with_child(
-                            label::dynamic(|data: &AppState, _: &Env| {
-                                data.login_error.clone().unwrap_or_default()
-                            })
-                            .with_text_color(main::PRIMARY),
-                        )
-                        .with_flex_spacer(1.),
-                ),
-                PageState::Loading => progress_view("正在获取用户代码……"),
-                PageState::Success => progress_view("验证成功！正在登录……"),
-                PageState::Code => {
-                    let code = label::dynamic(|data: &AppState, _: &Env| {
-                        data.login_microsoft_code.clone()
-                    })
-                    .with_text_size(32.);
+pub fn view(state: &AppState) -> Element<'_, Message> {
+    let theme = state.theme;
 
-                    let hint = label::new(
-                        "请点击下方按钮，在弹出的验证网页中输入用户代码并完成验证。\n\
-                         验证期间请不要退出这个页面。",
-                    );
+    if let Some(error) = state.login_error.as_ref().filter(|error| !error.is_empty()) {
+        return container(
+            column![
+                iced::widget::text(error.clone())
+                    .size(theme.typography.body.size)
+                    .font(theme.typography.body.font)
+                    .color(theme.main.primary),
+                space().height(Length::Fill),
+            ]
+            .padding(10),
+        )
+        .into();
+    }
 
-                    let open_button = scl_gui_widgets::widgets::Button::new("打开验证网站")
-                        .with_accent(true)
-                        .on_click(|ctx, data: &mut AppState, _env| {
-                            if !data.login_microsoft_url.is_empty() {
-                                ctx.submit_command(
-                                    OPEN_URL
-                                        .with(data.login_microsoft_url.clone())
-                                        .to(Target::Global),
-                                );
-                            }
-                        })
-                        .expand_width();
+    if state.login_microsoft_code.is_empty() {
+        return progress_view(state, "正在获取用户代码……");
+    }
 
-                    let copy_button = scl_gui_widgets::widgets::Button::new("复制用户代码")
-                        .on_click(|_ctx, data: &mut AppState, _env| {
-                            if !data.login_microsoft_code.is_empty() {
-                                copy_to_clipboard(data.login_microsoft_code.clone());
-                            }
-                        })
-                        .expand_width();
+    if state.login_microsoft_success {
+        return progress_view(state, "验证成功！正在登录……");
+    }
 
-                    Box::new(
-                        Flex::column()
-                            .with_flex_spacer(1.)
-                            .with_child(label::new("你的用户代码是"))
-                            .with_spacer(10.)
-                            .with_child(code)
-                            .with_spacer(10.)
-                            .with_child(hint)
-                            .with_flex_spacer(1.)
-                            .with_child(
-                                Flex::row()
-                                    .with_flex_child(open_button, 1.)
-                                    .with_spacer(10.)
-                                    .with_flex_child(copy_button, 1.),
-                            ),
-                    )
-                }
-            }
-        },
-    );
+    let code = iced::widget::text(state.login_microsoft_code.clone())
+        .size(32.0)
+        .font(theme.typography.base.font)
+        .color(theme.font_color);
 
-    Box::new(
-        Flex::column()
-            .with_flex_child(views, 1.)
-            .expand()
-            .padding(10.),
+    let hint = iced::widget::text(
+        "请点击下方按钮，在弹出的验证网页中输入用户代码并完成验证。\n验证期间请不要退出这个页面。",
     )
+    .size(theme.typography.base.size)
+    .font(theme.typography.base.font)
+    .color(theme.font_color);
+
+    let open = common::accent_button(
+        &theme,
+        "打开验证网站",
+        common::command(OPEN_URL, state.login_microsoft_url.clone()),
+    );
+    let open = container(open).width(Length::FillPortion(1));
+
+    let copy = common::button(
+        &theme,
+        "复制用户代码",
+        scl_gui_widgets::widgets::ButtonKind::Standard,
+        Message::Ui(UiMessage::CopyText(state.login_microsoft_code.clone())),
+    );
+    let copy = container(copy).width(Length::FillPortion(1));
+
+    container(
+        column![
+            space().height(Length::Fill),
+            common::label(&theme, "你的用户代码是"),
+            space().height(Length::Fixed(10.0)),
+            code,
+            space().height(Length::Fixed(10.0)),
+            hint,
+            space().height(Length::Fill),
+            row![open, space().width(Length::Fixed(10.0)), copy]
+                .align_y(Alignment::Center)
+                .width(Length::Fill),
+        ]
+        .spacing(4)
+        .padding(10)
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
+    .into()
 }

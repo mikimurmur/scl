@@ -2,18 +2,18 @@
 
 use std::str::FromStr;
 
-use druid::{EventCtx, Target};
+use crate::app::{EventCtx, Target};
 use scl_core::download::{
-    fabric::FabricDownloadExt, forge::ForgeDownloadExt, neoforge::NeoForgeDownloadExt,
-    optifine::OptifineDownloadExt, quiltmc::QuiltMCDownloadExt, vanilla::VanillaDownloadExt,
-    Downloader, GameDownload,
+    Downloader, GameDownload, fabric::FabricDownloadExt, forge::ForgeDownloadExt,
+    neoforge::NeoForgeDownloadExt, optifine::OptifineDownloadExt, quiltmc::QuiltMCDownloadExt,
+    vanilla::VanillaDownloadExt,
 };
 
 use crate::{
-    app::{AppEvent, DownloadRequest, APP_EVENT},
+    app::{APP_EVENT, AppEvent, DownloadRequest},
     app_state::{AppState, NetworkData},
     core::CoreTransformer,
-    utils::{thread::thread_main_report, Progress},
+    utils::{Progress, thread::thread_main_report},
 };
 
 /// 页面打开时加载所需数据

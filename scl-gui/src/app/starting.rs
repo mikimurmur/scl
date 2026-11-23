@@ -1,8 +1,8 @@
 //! 启动器启动时的初始化逻辑，以及启动游戏。
 
+use crate::app::{EventCtx, ExtEventSink, Target};
 use anyhow::Context as _;
-use druid::{EventCtx, ExtEventSink, Target};
-use futures::{io::BufReader, AsyncBufReadExt};
+use futures::{AsyncBufReadExt, io::BufReader};
 use scl_core::{
     client::{Client, ClientConfig},
     java::JavaRuntime,
@@ -10,7 +10,7 @@ use scl_core::{
 };
 
 use crate::{
-    app::{AppEvent, APP_EVENT},
+    app::{APP_EVENT, AppEvent},
     app_state::AppState,
     config::{Config, JavaRuntimeInfo},
     core::CoreTransformer,
@@ -84,7 +84,7 @@ mod win_window_scan {
     type Hwnd = isize;
 
     #[link(name = "user32")]
-    extern "system" {
+    unsafe extern "system" {
         fn EnumWindows(
             lp_enum_fn: unsafe extern "system" fn(Hwnd, isize) -> i32,
             l_param: isize,
@@ -181,7 +181,7 @@ pub fn hide_launcher_window() {
 #[cfg(target_os = "linux")]
 mod linux_window_scan {
     use std::{
-        ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void, CStr},
+        ffi::{CStr, c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void},
         ptr,
     };
 
@@ -197,7 +197,7 @@ mod linux_window_scan {
     }
 
     #[link(name = "X11")]
-    extern "C" {
+    unsafe extern "C" {
         fn XOpenDisplay(name: *const c_char) -> Display;
         fn XDefaultRootWindow(display: Display) -> Window;
         fn XQueryTree(
@@ -324,34 +324,38 @@ mod linux_window_scan {
         let mut parent_return: Window = 0;
         let mut children: *mut Window = ptr::null_mut();
         let mut count: c_uint = 0;
-        if XQueryTree(
-            display,
-            parent,
-            &mut root,
-            &mut parent_return,
-            &mut children,
-            &mut count,
-        ) == 0
+        if unsafe {
+            XQueryTree(
+                display,
+                parent,
+                &mut root,
+                &mut parent_return,
+                &mut children,
+                &mut count,
+            )
+        } == 0
         {
             return false;
         }
 
         let mut found = false;
         for i in 0..count as usize {
-            let window = *children.add(i);
+            let window = unsafe { *children.add(i) };
             let (title, class) = window_strings(display, window);
             let window_pid = window_pid(display, window);
             if is_game_window(&title, &class, pid, window_pid) {
                 found = true;
                 break;
             }
-            if depth > 0 && scan_children(display, window, depth - 1, pid) {
+            if depth > 0 && unsafe { scan_children(display, window, depth - 1, pid) } {
                 found = true;
                 break;
             }
         }
         if !children.is_null() {
-            XFree(children as *mut c_void);
+            unsafe {
+                XFree(children as *mut c_void);
+            }
         }
         found
     }
@@ -738,7 +742,7 @@ async fn handle_stderr_logging(
 pub fn init_settings(sink: ExtEventSink, config: Config) {
     thread_main(async move {
         use scl_core::{
-            download::{vanilla::VanillaDownloadExt, Downloader},
+            download::{Downloader, vanilla::VanillaDownloadExt},
             progress::{ReportState, Reporter},
         };
 
@@ -834,7 +838,7 @@ mod tests {
         assert!(official_window_class_matches("GLFW30")); // LWJGL 3（现代版）
         assert!(official_window_class_matches("LWJGL")); // LWJGL 2（1.12 及更早）
         assert!(official_window_class_matches("SunAwtFrame")); // AWT/Swing 窗口
-                                                               // 全等比较：前缀相同但多字符不命中
+        // 全等比较：前缀相同但多字符不命中
         assert!(!official_window_class_matches("GLFW3"));
         assert!(!official_window_class_matches("GLFW300"));
         assert!(!official_window_class_matches("LWJGLX"));

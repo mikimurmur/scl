@@ -25,7 +25,7 @@ use iced::{Alignment, Background, Border, Element, Length, Shadow};
 
 use crate::app::Message;
 pub use crate::app::{PUSH_PAGE, QUERY_POP_PAGE, RESET_PAGE_TO};
-use crate::app_state::AppState;
+use crate::app_state::{AppState, PageTransition, PageTransitionKind};
 
 /// 主页面 ID
 pub const PAGE_MAIN: &str = "main";
@@ -223,39 +223,7 @@ pub enum UiMessage {
 /// 创建启动器的根视图。
 pub fn view(state: &AppState) -> Element<'_, Message> {
     let theme = state.theme;
-    let page = match *state.pages.current() {
-        PAGE_MAIN => self::main_view(state),
-        PAGE_VERSION => version::view(state),
-        PAGE_DOWNLOAD => download::view(state),
-        PAGE_DOWNLOAD_VANILLA => download::vanilla::view(state),
-        PAGE_DOWNLOAD_FABRIC => download::fabric::view(state),
-        PAGE_DOWNLOAD_QUILTMC => download::quiltmc::view(state),
-        PAGE_DOWNLOAD_FORGE => download::forge::view(state),
-        PAGE_DOWNLOAD_NEOFORGE => download::neoforge::view(state),
-        PAGE_DOWNLOAD_OPTIFINE => download::optifine::view(state),
-        PAGE_ACCOUNTS => accounts::view(state),
-        PAGE_SETTINGS => settings::view(state),
-        PAGE_SETTINGS_JAVA => settings::java::view(state),
-        PAGE_UPDATE_LOG => settings::update::view(state),
-        PAGE_GAME_DIR => game_dir::view(state),
-        PAGE_LOGIN_METHODS => login_methods::view(state),
-        PAGE_LOGIN_OFFLINE => login::offline::view(state),
-        PAGE_LOGIN_MICROSOFT => login::microsoft::view(state),
-        PAGE_LOGIN_AUTHLIB => login::authlib::view(state),
-        PAGE_LOGIN_AUTHLIB_SELECT => login::authlib_select::view(state),
-        PAGE_VERSION_SETTING => version_setting::view(state),
-        PAGE_VERSION_SETTING_MODS => version_setting_mods::view(state),
-        PAGE_VERSION_SETTING_ADVANCE => version_setting_advance::view(state),
-        PAGE_VERSION_SETTING_REMOVE => version_setting_remove::view(state),
-        PAGE_MODS_DOWNLOAD => mods_download::view(state),
-        PAGE_MODS_DOWNLOAD_CURSEFORGE => mods_download_curseforge::view(state),
-        PAGE_MODS_DOWNLOAD_MODRINTH => mods_download_modrinth::view(state),
-        PAGE_MOD_FILE_DOWNLOAD => mod_files_download::view(state),
-        PAGE_MOD_DOWNLOAD_DEST => mod_download_dest::view(state),
-        PAGE_LAUNCH_ERROR => launch_error::view(state),
-        PAGE_STARTING => starting::view(state),
-        _ => self::main_view(state),
-    };
+    let page = page_content(state);
 
     let content = container(page)
         .width(Length::Fill)
@@ -309,6 +277,167 @@ pub fn view(state: &AppState) -> Element<'_, Message> {
     }
 
     root
+}
+
+fn page_content<'a>(state: &'a AppState) -> Element<'a, Message> {
+    match state.page_transition {
+        Some(transition) => page_transition_view(state, transition),
+        None => page_view(state, *state.pages.current()),
+    }
+}
+
+fn page_view<'a>(state: &'a AppState, page: &'static str) -> Element<'a, Message> {
+    match page {
+        PAGE_MAIN => self::main_view(state),
+        PAGE_VERSION => version::view(state),
+        PAGE_DOWNLOAD => download::view(state),
+        PAGE_DOWNLOAD_VANILLA => download::vanilla::view(state),
+        PAGE_DOWNLOAD_FABRIC => download::fabric::view(state),
+        PAGE_DOWNLOAD_QUILTMC => download::quiltmc::view(state),
+        PAGE_DOWNLOAD_FORGE => download::forge::view(state),
+        PAGE_DOWNLOAD_NEOFORGE => download::neoforge::view(state),
+        PAGE_DOWNLOAD_OPTIFINE => download::optifine::view(state),
+        PAGE_ACCOUNTS => accounts::view(state),
+        PAGE_SETTINGS => settings::view(state),
+        PAGE_SETTINGS_JAVA => settings::java::view(state),
+        PAGE_UPDATE_LOG => settings::update::view(state),
+        PAGE_GAME_DIR => game_dir::view(state),
+        PAGE_LOGIN_METHODS => login_methods::view(state),
+        PAGE_LOGIN_OFFLINE => login::offline::view(state),
+        PAGE_LOGIN_MICROSOFT => login::microsoft::view(state),
+        PAGE_LOGIN_AUTHLIB => login::authlib::view(state),
+        PAGE_LOGIN_AUTHLIB_SELECT => login::authlib_select::view(state),
+        PAGE_VERSION_SETTING => version_setting::view(state),
+        PAGE_VERSION_SETTING_MODS => version_setting_mods::view(state),
+        PAGE_VERSION_SETTING_ADVANCE => version_setting_advance::view(state),
+        PAGE_VERSION_SETTING_REMOVE => version_setting_remove::view(state),
+        PAGE_MODS_DOWNLOAD => mods_download::view(state),
+        PAGE_MODS_DOWNLOAD_CURSEFORGE => mods_download_curseforge::view(state),
+        PAGE_MODS_DOWNLOAD_MODRINTH => mods_download_modrinth::view(state),
+        PAGE_MOD_FILE_DOWNLOAD => mod_files_download::view(state),
+        PAGE_MOD_DOWNLOAD_DEST => mod_download_dest::view(state),
+        PAGE_LAUNCH_ERROR => launch_error::view(state),
+        PAGE_STARTING => starting::view(state),
+        _ => self::main_view(state),
+    }
+}
+
+/// 根据页面切换动画绘制旧页面/新页面的过渡帧。
+fn page_transition_view<'a>(
+    state: &'a AppState,
+    transition: PageTransition,
+) -> Element<'a, Message> {
+    let theme = state.theme;
+    // 与旧版 PageSwitcher 一致：先对整体进度做 ease-out-expo，再按 0.5 分成
+    // 退出/进入两个阶段。这样切换最明显的一段发生在动画前段。
+    let progress = scl_gui_animation::tween::ease_out_expo(transition.progress() as f64) as f32;
+
+    let (page, scale, translate_x, translate_y, translate_y_px, fade) = match transition.kind {
+        PageTransitionKind::PushSlide => {
+            if progress < 0.5 {
+                let p = progress * 2.0;
+                (transition.from, 1.0, -p, 0.0, 0.0, 0.0)
+            } else {
+                let p = (progress - 0.5) * 2.0;
+                (transition.to, 1.0, 1.0 - p, 0.0, 0.0, 0.0)
+            }
+        }
+        PageTransitionKind::PopSlide => {
+            if progress < 0.5 {
+                let p = progress * 2.0;
+                (transition.from, 1.0, p, 0.0, 0.0, 0.0)
+            } else {
+                let p = (progress - 0.5) * 2.0;
+                (transition.to, 1.0, -(1.0 - p), 0.0, 0.0, 0.0)
+            }
+        }
+        PageTransitionKind::PushZoom => {
+            if progress < 0.5 {
+                let p = progress * 2.0;
+                (
+                    transition.from,
+                    1.0 + p * 0.15,
+                    -p * 0.075,
+                    -p * 0.075,
+                    0.0,
+                    p,
+                )
+            } else {
+                let p = (progress - 0.5) * 2.0;
+                (
+                    transition.to,
+                    0.85 + p * 0.15,
+                    (1.0 - p) * 0.075,
+                    (1.0 - p) * 0.075,
+                    0.0,
+                    1.0 - p,
+                )
+            }
+        }
+        PageTransitionKind::PopZoom => {
+            if progress < 0.5 {
+                let p = progress * 2.0;
+                (
+                    transition.from,
+                    1.0 - p * 0.15,
+                    p * 0.075,
+                    p * 0.075,
+                    0.0,
+                    p,
+                )
+            } else {
+                let p = (progress - 0.5) * 2.0;
+                (
+                    transition.to,
+                    1.0 + (1.0 - p) * 0.15,
+                    -(1.0 - p) * 0.075,
+                    -(1.0 - p) * 0.075,
+                    0.0,
+                    1.0 - p,
+                )
+            }
+        }
+        PageTransitionKind::StartMoveUp => {
+            let remaining = 1.0 - progress;
+            (transition.to, 1.0, 0.0, 0.0, remaining * 100.0, remaining)
+        }
+    };
+
+    let page = page_view(state, page);
+    // 在 Float 内部叠一层背景色，让缩放动画可以通过改变这层的 alpha
+    // 模拟旧版 PageSwitcher 的“淡出到窗口背景”效果。放在同一层里可以
+    // 保证它跟着页面一起缩放/平移，并始终盖在页面内容之上。
+    let fade = transition_fade(theme.window_background, fade);
+    let content: Element<'a, Message> = iced::widget::stack![page, fade]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
+
+    iced::widget::float(content)
+        .scale(scale)
+        .translate(move |_, viewport| {
+            iced::Vector::new(
+                viewport.width * translate_x,
+                viewport.height * translate_y + translate_y_px,
+            )
+        })
+        .into()
+}
+
+fn transition_fade(background: iced::Color, alpha: f32) -> Element<'static, Message> {
+    let alpha = alpha.clamp(0.0, 1.0);
+
+    container(space())
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| iced::widget::container::Style {
+            background: Some(Background::Color(iced::Color {
+                a: alpha,
+                ..background
+            })),
+            ..iced::widget::container::Style::default()
+        })
+        .into()
 }
 
 fn main_view(state: &AppState) -> Element<'_, Message> {

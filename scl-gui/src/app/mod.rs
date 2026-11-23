@@ -20,6 +20,7 @@ use std::any::Any;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures::channel::mpsc;
 use iced::widget::image;
@@ -31,14 +32,17 @@ use scl_core::{auth::generate_offline_uuid, download::AuthlibDownloadExt};
 use crate::{
     app_state::{
         AppState, DownloadState, LocalMod, LocalVersionInfo, ModFileState, ModState, NetworkData,
+        PageTransition, PageTransitionKind,
     },
     config,
     core::{AuthMethod, CoreTransformer, SCLLaunchConfig, VersionInfo},
     ui::{
-        PAGE_ACCOUNTS, PAGE_DOWNLOAD, PAGE_LAUNCH_ERROR, PAGE_LOGIN_AUTHLIB,
-        PAGE_LOGIN_AUTHLIB_SELECT, PAGE_LOGIN_MICROSOFT, PAGE_LOGIN_OFFLINE, PAGE_MAIN,
-        PAGE_MOD_DOWNLOAD_DEST, PAGE_MODS_DOWNLOAD, PAGE_MODS_DOWNLOAD_CURSEFORGE,
-        PAGE_MODS_DOWNLOAD_MODRINTH, PAGE_STARTING, PAGE_VERSION_SETTING,
+        PAGE_ACCOUNTS, PAGE_DOWNLOAD, PAGE_DOWNLOAD_FABRIC, PAGE_DOWNLOAD_FORGE,
+        PAGE_DOWNLOAD_NEOFORGE, PAGE_DOWNLOAD_OPTIFINE, PAGE_DOWNLOAD_QUILTMC,
+        PAGE_DOWNLOAD_VANILLA, PAGE_LAUNCH_ERROR, PAGE_LOGIN_AUTHLIB, PAGE_LOGIN_AUTHLIB_SELECT,
+        PAGE_LOGIN_MICROSOFT, PAGE_LOGIN_OFFLINE, PAGE_MAIN, PAGE_MOD_DOWNLOAD_DEST,
+        PAGE_MOD_FILE_DOWNLOAD, PAGE_MODS_DOWNLOAD, PAGE_MODS_DOWNLOAD_CURSEFORGE,
+        PAGE_MODS_DOWNLOAD_MODRINTH, PAGE_STARTING, PAGE_UPDATE_LOG, PAGE_VERSION_SETTING,
         PAGE_VERSION_SETTING_MODS,
     },
     utils::{Progress, thread::thread_main},
@@ -266,8 +270,8 @@ pub enum Message {
     CopyAsyncError,
     /// 页面控件产生的界面消息。
     Ui(crate::ui::UiMessage),
-    /// 动画帧。
-    Tick,
+    /// 动画帧，携带当前时间以便按真实时间推进动画。
+    Tick(Instant),
     /// 选择游戏文件夹。
     PickFolder,
     /// 选择 Java 可执行文件。
@@ -322,7 +326,7 @@ pub const QUERY_POP_PAGE: Selector<&'static str> = Selector::new("net.stevexmh.s
 pub const RESET_PAGE_TO: Selector<&'static str> = Selector::new("net.stevexmh.scl.reset-page-to");
 /// 启用/禁用标题栏返回按钮。
 pub const ENABLE_BACK_PAGE: Selector<bool> = Selector::new("net.stevexmh.scl.enable-back-page");
-/// 设置页面切换动画（Iced 版本保留字段，不再有动画）。
+/// 设置页面切换使用滑动动画（否则使用缩放动画）。
 pub const SET_SLIDE_PAGE_ANIMATION: Selector<bool> =
     Selector::new("net.stevexmh.scl.set-slide-page-animation");
 /// 设置窗口背景图。
@@ -762,6 +766,8 @@ pub struct AppWrapper {
     last_page: String,
     /// 紧随其后的页面进入是否由返回触发。
     next_on_page_is_pop: bool,
+    /// 上一帧动画时间，用于按真实时间推进动画相位。
+    last_tick: Option<Instant>,
 }
 
 impl AppWrapper {
@@ -1727,6 +1733,7 @@ impl AppWrapper {
             started: false,
             last_page: String::new(),
             next_on_page_is_pop: false,
+            last_tick: None,
         };
 
         (launcher, iced::window::latest().map(Message::WindowReady))
@@ -1789,8 +1796,27 @@ impl AppWrapper {
                 Task::none()
             }
             Message::Ui(message) => self.handle_ui_message(message),
-            Message::Tick => {
-                self.state.animation_phase = (self.state.animation_phase + 0.02) % 1.0;
+            Message::Tick(now) => {
+                let dt = self
+                    .last_tick
+                    .replace(now)
+                    .map(|last| now.saturating_duration_since(last).as_secs_f32())
+                    .filter(|dt| *dt <= 0.25)
+                    .unwrap_or(1.0 / 60.0)
+                    .clamp(0.0, 0.1);
+                // 不确定进度条的相位按真实时间推进，避免帧率变化时速度漂移。
+                self.state.animation_phase = (self.state.animation_phase + dt * 1.2) % 1.0;
+                if let Some(transition) = self.state.page_transition {
+                    if transition.is_finished_at(now) {
+                        tracing::debug!(
+                            "page transition finished: {:?} -> {:?} ({:?})",
+                            transition.from,
+                            transition.to,
+                            transition.kind
+                        );
+                        self.state.page_transition = None;
+                    }
+                }
                 Task::none()
             }
             Message::PickFolder => Task::perform(
@@ -1908,34 +1934,52 @@ impl AppWrapper {
             iced::window::close_requests().map(|_| Message::Quit),
         ];
 
-        if self.is_animating() {
-            subscriptions.push(iced::window::frames().map(|_| Message::Tick));
+        if self.state.page_transition.is_some() {
+            // 页面过渡需要更顺滑的 60fps；只在 300ms 的过渡期间使用。
+            subscriptions.push(Subscription::run(animation_stream_60));
+        } else if self.spinner_active() {
+            // 加载动画用 30fps 足够，避免旧版 window::frames() 在无 vsync 环境下
+            // 跑到数百 fps 而持续占用 CPU。
+            subscriptions.push(Subscription::run(animation_stream_30));
         }
 
         Subscription::batch(subscriptions)
     }
 
-    fn is_animating(&self) -> bool {
-        if !self.state.progress.is_empty()
-            || self.state.launching
-            || self.state.login_busy
-            || self.state.mods_download_curseforge_searching
-            || self.state.mods_download_modrinth_searching
-            || self.state.launching
+    /// 当前页面或进度遮罩是否显示不确定进度动画。
+    fn spinner_active(&self) -> bool {
+        if self
+            .state
+            .progress
+            .values()
+            .any(|entry| entry.max.is_none())
         {
             return true;
         }
 
         match *self.state.pages.current() {
             PAGE_STARTING => true,
+            PAGE_UPDATE_LOG => self.state.update_logs.is_none(),
             PAGE_LOGIN_MICROSOFT => {
-                self.state.login_error.is_none() && self.state.login_microsoft_code.is_empty()
-                    || self.state.login_microsoft_success
+                self.state
+                    .login_error
+                    .as_deref()
+                    .map(str::is_empty)
+                    .unwrap_or(true)
+                    && (self.state.login_microsoft_code.is_empty()
+                        || self.state.login_microsoft_success)
             }
             PAGE_MODS_DOWNLOAD_CURSEFORGE => {
                 self.state.mods_download_curseforge_result_mods.is_none()
             }
             PAGE_MODS_DOWNLOAD_MODRINTH => self.state.mods_download_modrinth_result_mods.is_none(),
+            PAGE_MOD_FILE_DOWNLOAD => self.state.mod_file_downloads_files.is_none(),
+            PAGE_DOWNLOAD_VANILLA => network_loading(&self.state.download_state_vanilla),
+            PAGE_DOWNLOAD_FABRIC => network_loading(&self.state.download_state_fabric),
+            PAGE_DOWNLOAD_QUILTMC => network_loading(&self.state.download_state_quiltmc),
+            PAGE_DOWNLOAD_FORGE => network_loading(&self.state.download_state_forge),
+            PAGE_DOWNLOAD_NEOFORGE => network_loading(&self.state.download_state_neoforge),
+            PAGE_DOWNLOAD_OPTIFINE => network_loading(&self.state.download_state_optifine),
             _ => false,
         }
     }
@@ -1965,6 +2009,8 @@ impl AppWrapper {
             return;
         }
         self.started = true;
+        self.state.page_transition =
+            Some(PageTransition::start_move_up(*self.state.pages.current()));
 
         let ctx = self.event_ctx();
         let sink = ctx.get_external_handle();
@@ -2048,7 +2094,9 @@ impl AppWrapper {
             self.on_page(&mut ctx, page);
             return;
         }
+        let from = *self.state.pages.current();
         self.state.pages.push(page);
+        self.begin_page_transition(from, page, true);
         let mut ctx = ctx.clone();
         self.on_page(&mut ctx, page);
     }
@@ -2066,9 +2114,10 @@ impl AppWrapper {
         if !changed {
             return;
         }
+        let current = *self.state.pages.current();
+        self.begin_page_transition(old, current, false);
         self.handle_pop_page(ctx, old);
         self.next_on_page_is_pop = true;
-        let current = *self.state.pages.current();
         let mut ctx = ctx.clone();
         self.on_page(&mut ctx, current);
     }
@@ -2076,12 +2125,31 @@ impl AppWrapper {
     fn reset_page(&mut self, ctx: &EventCtx, page: &'static str) {
         let old = *self.state.pages.current();
         self.state.pages.reset_to(page);
+        // RESET_PAGE_TO 是启动失败收尾的强制重置：立即撤销过渡，避免
+        // 与随后 push 的错误页动画互相干扰。
+        self.state.page_transition = None;
         if old != page {
             self.handle_pop_page(ctx, old);
         }
         self.next_on_page_is_pop = false;
         let mut ctx = ctx.clone();
         self.on_page(&mut ctx, page);
+    }
+
+    /// 开始一次页面切换动画。页面栈已经切换完成，这里只记录视觉过渡。
+    fn begin_page_transition(&mut self, from: &'static str, to: &'static str, is_push: bool) {
+        if from == to {
+            return;
+        }
+
+        let kind = match (is_push, self.state.slide_page_animation) {
+            (true, true) => PageTransitionKind::PushSlide,
+            (true, false) => PageTransitionKind::PushZoom,
+            (false, true) => PageTransitionKind::PopSlide,
+            (false, false) => PageTransitionKind::PopZoom,
+        };
+        tracing::debug!("page transition started: {from:?} -> {to:?} ({kind:?})");
+        self.state.page_transition = Some(PageTransition::new(from, to, kind));
     }
 
     fn handle_pop_page(&mut self, ctx: &EventCtx, page: &str) {
@@ -2357,6 +2425,32 @@ fn event_stream() -> impl futures::Stream<Item = Message> {
             .await
             .map(|message| (message, Some(receiver)))
     })
+}
+
+/// 低负载/过渡动画的定时订阅。
+///
+/// Iced 0.14 的 `thread-pool` 后端没有 `iced::time::every`，而
+/// `window::frames()` 会跟随显示刷新率（在无 vsync 环境下可能跑到数百 fps）。
+/// 这里用 `smol::Timer` 产生固定间隔的帧，既能降低 CPU，也不会在动画结束后
+/// 继续请求重绘。
+fn animation_stream_60() -> impl futures::Stream<Item = Message> {
+    animation_stream(Duration::from_millis(16))
+}
+
+fn animation_stream_30() -> impl futures::Stream<Item = Message> {
+    animation_stream(Duration::from_millis(33))
+}
+
+fn animation_stream(interval: Duration) -> impl futures::Stream<Item = Message> {
+    futures::stream::unfold((), move |_| async move {
+        smol::Timer::after(interval).await;
+        Some((Message::Tick(Instant::now()), ()))
+    })
+}
+
+/// 网络数据是否仍处于没有结果、也没有错误的加载状态。
+fn network_loading<T>(data: &NetworkData<T>) -> bool {
+    data.get().is_none() && data.error.is_none()
 }
 
 fn show_launch_error_page(ctx: &EventCtx) {

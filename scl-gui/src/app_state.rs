@@ -1,6 +1,7 @@
 //! 启动器的全局界面状态。
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -210,6 +211,76 @@ pub struct ProgressEntry {
     pub max: Option<f64>,
 }
 
+/// 页面切换动画类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageTransitionKind {
+    /// 滑动进入新页面。
+    PushSlide,
+    /// 滑动返回上一页。
+    PopSlide,
+    /// 缩放进入新页面。
+    PushZoom,
+    /// 缩放返回上一页。
+    PopZoom,
+    /// 启动时首个页面从下方向上浮入。
+    StartMoveUp,
+}
+
+/// 一次正在进行的页面切换动画。
+///
+/// 页面栈本身仍然立即切换，动画只负责在旧页面和新页面之间做视觉过渡；
+/// 这样业务逻辑（页面进入/离开回调）不需要为了动画延后执行。
+#[derive(Debug, Clone, Copy)]
+pub struct PageTransition {
+    /// 正在退出的页面。
+    pub from: &'static str,
+    /// 正在进入的页面。
+    pub to: &'static str,
+    /// 动画类型。
+    pub kind: PageTransitionKind,
+    /// 动画开始时间。
+    started_at: Instant,
+    /// 动画总时长。
+    duration: Duration,
+}
+
+impl PageTransition {
+    /// 页面切换动画时长（与旧版 PageSwitcher 一致）。
+    pub const DEFAULT_DURATION: Duration = Duration::from_millis(300);
+
+    /// 创建一次页面切换动画。
+    pub fn new(from: &'static str, to: &'static str, kind: PageTransitionKind) -> Self {
+        Self {
+            from,
+            to,
+            kind,
+            started_at: Instant::now(),
+            duration: Self::DEFAULT_DURATION,
+        }
+    }
+
+    /// 启动时首个页面的浮入动画。
+    pub fn start_move_up(page: &'static str) -> Self {
+        Self::new(page, page, PageTransitionKind::StartMoveUp)
+    }
+
+    /// 当前动画进度，范围为 `0.0..=1.0`。
+    pub fn progress_at(&self, now: Instant) -> f32 {
+        let elapsed = now.saturating_duration_since(self.started_at);
+        (elapsed.as_secs_f32() / self.duration.as_secs_f32().max(f32::EPSILON)).clamp(0.0, 1.0)
+    }
+
+    /// 当前动画进度。
+    pub fn progress(&self) -> f32 {
+        self.progress_at(Instant::now())
+    }
+
+    /// 动画是否已经结束。
+    pub fn is_finished_at(&self, now: Instant) -> bool {
+        self.progress_at(now) >= 1.0
+    }
+}
+
 /// 启动器全局状态
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -374,6 +445,8 @@ pub struct AppState {
     pub theme: Theme,
     /// 页面栈。
     pub pages: PageSwitcher<&'static str>,
+    /// 当前正在播放的页面切换动画。
+    pub page_transition: Option<PageTransition>,
     /// 当前窗口 ID。
     pub window: Option<iced::window::Id>,
     /// 后台任务进度表。
@@ -382,7 +455,7 @@ pub struct AppState {
     pub async_error: Option<(String, String)>,
     /// 是否允许标题栏显示返回按钮。
     pub back_enabled: bool,
-    /// 页面切换动画开关（Iced 版本保留配置语义）。
+    /// 页面切换动画开关：`true` 使用滑动，`false` 使用缩放。
     pub slide_page_animation: bool,
     /// 窗口背景图。
     pub background_image: Option<image::Handle>,
@@ -445,6 +518,7 @@ impl AppState {
     /// 使用配置创建一个新的全局状态
     pub fn new(config: Config) -> Self {
         let memory_size_str = config.mem_size.to_string();
+        let slide_page_animation = config.theme.slide_page_animation;
         let theme = crate::theme::theme_from_config(&config);
         Self {
             config,
@@ -522,11 +596,12 @@ impl AppState {
             first_run: false,
             theme,
             pages: PageSwitcher::new(crate::ui::PAGE_MAIN),
+            page_transition: None,
             window: None,
             progress: BTreeMap::new(),
             async_error: None,
             back_enabled: true,
-            slide_page_animation: true,
+            slide_page_animation,
             background_image: None,
             animation_phase: 0.0,
             collapsed_folders: BTreeSet::new(),
@@ -920,4 +995,40 @@ pub fn apply_mock(state: &mut AppState) {
     state.config.minecraft_folder = crate::config::MinecraftFolder::CurrentDirectory;
     state.config.minecraft_folders = im::Vector::new();
     state.theme = crate::theme::theme_from_config(&state.config);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PageTransition, PageTransitionKind};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn page_transition_progress_is_time_based_and_clamped() {
+        let now = Instant::now();
+        let transition = PageTransition {
+            from: "main",
+            to: "settings",
+            kind: PageTransitionKind::PushSlide,
+            started_at: now,
+            duration: Duration::from_millis(300),
+        };
+
+        assert_eq!(transition.progress_at(now), 0.0);
+        assert!((transition.progress_at(now + Duration::from_millis(150)) - 0.5).abs() < 0.001);
+        assert_eq!(
+            transition.progress_at(now + Duration::from_millis(300)),
+            1.0
+        );
+        assert_eq!(transition.progress_at(now + Duration::from_secs(10)), 1.0);
+        assert!(transition.is_finished_at(now + Duration::from_millis(300)));
+        assert!(!transition.is_finished_at(now + Duration::from_millis(299)));
+    }
+
+    #[test]
+    fn start_move_up_uses_current_page_for_both_sides() {
+        let transition = PageTransition::start_move_up("main");
+        assert_eq!(transition.from, "main");
+        assert_eq!(transition.to, "main");
+        assert_eq!(transition.kind, PageTransitionKind::StartMoveUp);
+    }
 }

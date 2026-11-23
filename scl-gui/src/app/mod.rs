@@ -1805,7 +1805,8 @@ impl AppWrapper {
                     .unwrap_or(1.0 / 60.0)
                     .clamp(0.0, 0.1);
                 // 不确定进度条的相位按真实时间推进，避免帧率变化时速度漂移。
-                self.state.animation_phase = (self.state.animation_phase + dt * 1.2) % 1.0;
+                // 相位 0→1 对应一个往返周期，速度与原来单程约 0.83s 一致。
+                self.state.animation_phase = (self.state.animation_phase + dt * 0.6) % 1.0;
                 if let Some(transition) = self.state.page_transition {
                     if transition.is_finished_at(now) {
                         tracing::debug!(
@@ -1935,11 +1936,13 @@ impl AppWrapper {
         ];
 
         if self.state.page_transition.is_some() {
-            // 页面过渡需要更顺滑的 60fps；只在 300ms 的过渡期间使用。
-            subscriptions.push(Subscription::run(animation_stream_60));
+            // 页面过渡只有约 300ms，跟随真实绘制帧能让滑动/缩放最顺滑；
+            // 这段时间的订阅会在过渡结束后立刻移除。
+            subscriptions.push(iced::window::frames().map(Message::Tick));
         } else if self.spinner_active() {
-            // 加载动画用 30fps 足够，避免旧版 window::frames() 在无 vsync 环境下
-            // 跑到数百 fps 而持续占用 CPU。
+            // 不确定进度条只需要约 30fps。这里不能用 window::frames：在没有
+            // vsync 的环境（Xvfb、部分 X11 驱动）重绘会跑到数百 fps，加载页
+            // 会持续吃满一个核心。固定间隔的定时器可以避免这种空转。
             subscriptions.push(Subscription::run(animation_stream_30));
         }
 
@@ -2427,23 +2430,14 @@ fn event_stream() -> impl futures::Stream<Item = Message> {
     })
 }
 
-/// 低负载/过渡动画的定时订阅。
+/// 不确定进度条的 30fps 定时订阅。
 ///
-/// Iced 0.14 的 `thread-pool` 后端没有 `iced::time::every`，而
-/// `window::frames()` 会跟随显示刷新率（在无 vsync 环境下可能跑到数百 fps）。
-/// 这里用 `smol::Timer` 产生固定间隔的帧，既能降低 CPU，也不会在动画结束后
-/// 继续请求重绘。
-fn animation_stream_60() -> impl futures::Stream<Item = Message> {
-    animation_stream(Duration::from_millis(16))
-}
-
+/// Iced 0.14 的 `thread-pool` 后端没有 `iced::time::every`，这里用
+/// `smol::Timer` 产生固定间隔的帧；进度条相位按真实时间推进，所以定时器
+/// 偶尔抖动也不会影响动画速度。
 fn animation_stream_30() -> impl futures::Stream<Item = Message> {
-    animation_stream(Duration::from_millis(33))
-}
-
-fn animation_stream(interval: Duration) -> impl futures::Stream<Item = Message> {
-    futures::stream::unfold((), move |_| async move {
-        smol::Timer::after(interval).await;
+    futures::stream::unfold((), |_| async {
+        smol::Timer::after(Duration::from_millis(33)).await;
         Some((Message::Tick(Instant::now()), ()))
     })
 }

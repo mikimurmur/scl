@@ -36,7 +36,10 @@ pub fn indeterminate_progress<'a, Message: 'a>(
     // Iced 自带进度条没有不确定模式；用一个往返移动的短条模拟。
     let theme = *theme;
     let width = 0.25;
-    let position = (phase.clamp(0.0, 1.0) * (1.0 - width)).clamp(0.0, 1.0 - width);
+    // 0→1 为从左到右，1→2 为从右到左，避免相位回绕时短条瞬间跳回左端。
+    let cycle = phase.clamp(0.0, 1.0) * 2.0;
+    let sweep = if cycle <= 1.0 { cycle } else { 2.0 - cycle };
+    let position = (sweep * (1.0 - width)).clamp(0.0, 1.0 - width);
 
     iced::widget::stack![
         iced::widget::container(iced::widget::space())

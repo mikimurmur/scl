@@ -103,7 +103,11 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
 
     let dependencies = Flex::column()
         .cross_axis_alignment(CrossAxisAlignment::Fill)
-        .with_child(dependency("surf", "By dignifiedquire", "MIT OR Apache-2.0"))
+        .with_child(dependency(
+            "ureq",
+            "By Martin Algesten",
+            "MIT OR Apache-2.0",
+        ))
         .with_child(dependency(
             "bangbang93's minecraft launcher api",
             "By bangbang93",
@@ -121,7 +125,11 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
             "By David Tolnay",
             "Under MIT OR Apache-2.0 licence",
         ))
-        .with_child(dependency("smol", "By smol-rs", "Under Apache-2.0 OR MIT"));
+        .with_child(dependency(
+            "rayon",
+            "By rayon-rs",
+            "Under Apache-2.0 OR MIT",
+        ));
 
     Box::new(
         Flex::column()
@@ -129,8 +137,8 @@ pub fn ui_builder() -> Box<dyn Widget<AppState>> {
             .with_child(label::new("Sharp Craft Launcher 1.2.0"))
             .with_child(label::new("By SteveXMH"))
             .with_child(label::new(concat!("编译日期：", env!("SCL_BUILD_DATE"))))
-            .with_child(label::new("操作系统：Linux"))
-            .with_child(label::new("软件架构：x86_64"))
+            .with_child(label::new(concat!("操作系统：", env!("SCL_TARGET_OS"))))
+            .with_child(label::new(concat!("软件架构：", env!("SCL_TARGET_ARCH"))))
             .with_spacer(8.)
             .with_child(update_status)
             .with_spacer(8.)

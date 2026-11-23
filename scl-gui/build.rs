@@ -34,6 +34,10 @@ fn emit(name: &str) {
 }
 
 fn main() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        embed_windows_icon();
+    }
+
     for path in ["build.rs", "src", "../.env"] {
         println!("cargo:rerun-if-changed={path}");
     }
@@ -48,11 +52,34 @@ fn main() {
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
         .unwrap_or_default();
     println!("cargo:rustc-env=SCL_BUILD_DATE={date}");
-    let os = match std::env::consts::OS {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let os = match target_os.as_str() {
         "windows" => "Windows",
         "macos" => "macOS",
+        "linux" => "Linux",
         other => other,
     };
     println!("cargo:rustc-env=SCL_TARGET_OS={os}");
-    println!("cargo:rustc-env=SCL_TARGET_ARCH={}", std::env::consts::ARCH);
+    println!(
+        "cargo:rustc-env=SCL_TARGET_ARCH={}",
+        env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default()
+    );
+}
+
+/// 把 `assets/logo.ico` 嵌入 Windows 可执行文件。
+///
+/// 图标由 `assets/logo.svg` 生成：
+/// `convert -background none assets/logo.svg -define icon:auto-resize=256,128,64,48,32,24,16 assets/logo.ico`
+///
+/// Druid 的 Windows 后端通过 `LoadIconW(..., MAKEINTRESOURCEW(1))` 读取
+/// 资源 ID 1 作为窗口图标，`winresource` 的 `set_icon` 恰好写入该 ID。
+fn embed_windows_icon() {
+    let icon = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR 未设置"))
+        .join("../assets/logo.ico");
+    println!("cargo:rerun-if-changed={}", icon.display());
+    let mut resource = winresource::WindowsResource::new();
+    resource.set_icon(icon.to_str().expect("Windows 图标路径不是合法的 UTF-8"));
+    if let Err(err) = resource.compile() {
+        panic!("编译 Windows 图标资源失败：{err}");
+    }
 }

@@ -36,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
     steps:
       - name: 克隆仓库
         uses: actions/checkout@v4
@@ -75,3 +75,45 @@ jobs:
           path: |
             target/release/SharpCraftLauncher
             target/release/SharpCraftLauncher.exe
+
+  # macOS 二进制在 Linux 上交叉编译；这里只能做编译检查，无法运行 macOS 测试。
+  macos-cross:
+    name: 编译（macOS，Linux 交叉编译）
+    runs-on: ubuntu-latest
+    container:
+      # 该镜像内置 Zig、cargo-zigbuild、Rust 与 macOS SDK，避免在 CI 里重复
+      # 构建 osxcross 工具链。镜像不可用时也可退回 setup-osxcross + 手动下载 SDK。
+      image: ghcr.io/rust-cross/cargo-zigbuild:0.24.1
+    env:
+      # Zig 0.16 默认把最低系统版本设为 macOS 13，这里固定为 Apple Silicon
+      # 的最低版本 11.0，避免产物的系统要求被无意抬高。
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - name: 克隆仓库
+        uses: actions/checkout@v4
+
+      - name: 缓存 Rust 构建
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-macos-cross
+          cache-on-failure: true
+
+      # 交叉编译无法执行 macOS 测试，只做与原生 macOS runner 相同的编译检查。
+      # 排除 scl-macro：它的 dev-dependency 会带出 host 侧 GTK，macOS 目标用不到。
+      - name: cargo check（macOS）
+        run: |
+          cargo-zigbuild check --workspace --all-targets \
+            --exclude scl-macro --target aarch64-apple-darwin
+
+      - name: 构建 release 产物（macOS 通用二进制）
+        run: cargo zigbuild -p sharp_craft_launcher --release --target universal2-apple-darwin
+        env:
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+          MICROSOFT_LEGACY_CLIENT_ID: ${{ secrets.MICROSOFT_LEGACY_CLIENT_ID }}
+          SCL_MICROSOFT_CLIENT_ID: ${{ secrets.SCL_MICROSOFT_CLIENT_ID }}
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: SharpCraftLauncher-${{ github.sha }}-macos-universal
+          path: target/universal2-apple-darwin/release/SharpCraftLauncher
